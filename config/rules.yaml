@@ -1,0 +1,54 @@
+dataset:
+  required_columns: [date, store, department, region, weekly_sales, transactions]
+  dtypes:
+    date: datetime
+    store: string
+    department: string
+    region: category
+    weekly_sales: float
+    transactions: int
+
+cleaning:
+  trim_strings: true
+  drop_duplicates: true
+  null_policy:
+    weekly_sales: impute_median      # [drop_row | zero | impute_median]
+    transactions: impute_median
+  clip_ranges:
+    weekly_sales: [0, null]          # min, max (null = no cap)
+
+outliers:
+  method: iqr                        # [iqr | zscore | mad]
+  threshold:
+    iqr: 1.5
+    zscore: 3.0
+    mad: 3.5
+  group_by: [store]                  # detect per store
+  treat: flag                        # [flag | winsorize | remove]
+
+kpis:
+  time_freq: W                       # weekly
+  aggregates:
+    weekly_sales: [sum, mean]
+    transactions: [sum]
+  derived:
+    avg_order_value: "weekly_sales_sum / NULLIF(transactions_sum,0)"
+
+plots:
+  - id: trend_sales
+    kind: line
+    x: date
+    y: weekly_sales_sum
+    title: "Weekly Sales Trend"
+  - id: sales_by_region
+    kind: bar
+    x: region
+    y: weekly_sales_sum
+    title: "Sales by Region"
+  - id: top_departments
+    kind: bar
+    x: department
+    y: weekly_sales_sum
+    sort: desc
+    top_n: 10
+    title: "Top 10 Departments by Sales"

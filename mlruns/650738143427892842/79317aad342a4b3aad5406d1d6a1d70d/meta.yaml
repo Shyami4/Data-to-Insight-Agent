@@ -1,0 +1,14 @@
+artifact_uri: file:C:/Users/shyam/GitHub/data-to-insight-agent/mlruns/650738143427892842/79317aad342a4b3aad5406d1d6a1d70d/artifacts
+end_time: 1760212775464
+entry_point_name: ''
+experiment_id: '650738143427892842'
+lifecycle_stage: active
+run_id: 79317aad342a4b3aad5406d1d6a1d70d
+run_name: analyze_data
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1760212775314
+status: 3
+tags: []
+user_id: shyam

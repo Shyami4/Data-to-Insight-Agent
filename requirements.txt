@@ -1,0 +1,12 @@
+streamlit-option-menu
+pandas
+numpy
+plotly
+openai>=1.12.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+scikit-learn
+scipy
+mlflow
+python-dotenv
+pyyaml
