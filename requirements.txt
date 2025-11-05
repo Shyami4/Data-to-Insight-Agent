@@ -10,3 +10,4 @@ scipy
 mlflow
 python-dotenv
 pyyaml
+statsmodels>=0.14

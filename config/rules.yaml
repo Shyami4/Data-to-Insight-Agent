@@ -7,34 +7,33 @@ dataset:
     region: category
     weekly_sales: float
     transactions: int
+  optional_columns: [units_sold, discount_applied, cost_of_goods_sold, product_category, customer_segment]
 
 cleaning:
   trim_strings: true
   drop_duplicates: true
   null_policy:
-    weekly_sales: impute_median      # [drop_row | zero | impute_median]
+    weekly_sales: impute_median       # [drop_row | zero | impute_median]
     transactions: impute_median
   clip_ranges:
-    weekly_sales: [0, null]          # min, max (null = no cap)
+    weekly_sales: [0, null]           # min, max (null = no cap)
+    transactions: [0, null]
 
 outliers:
-  method: iqr                        # [iqr | zscore | mad]
-  threshold:
-    iqr: 1.5
-    zscore: 3.0
-    mad: 3.5
-  group_by: [store]                  # detect per store
-  treat: flag                        # [flag | winsorize | remove]
+  method: iqr                         # [iqr | zscore | mad] (currently only iqr used)
+  group_by: store                     # detect per store (string)
+  k: 1.5                              # IQR multiplier
+  treat: flag                         # [flag | winsorize | remove] (we flag only)
 
 kpis:
-  time_freq: W                       # weekly
+  time_freq: W                        # weekly
   aggregates:
     weekly_sales: [sum, mean]
     transactions: [sum]
   derived:
     avg_order_value: "weekly_sales_sum / NULLIF(transactions_sum,0)"
 
-plots:
+plots:                                # optional; not required by pipeline
   - id: trend_sales
     kind: line
     x: date
