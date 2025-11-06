@@ -4,6 +4,11 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+# --- Colors used across the app (top-level in plots.py) ---
+COLOR_ABOVE = "#69d3f3"
+COLOR_BELOW = "#f547ce"
+COLOR_AVG   = "#a3a3a3"
+
 # ----------------------- Utilities -----------------------
 
 def prep_common(df: pd.DataFrame):
@@ -89,7 +94,7 @@ def fig_wow_bars(weekly_dict: dict, height=280) -> go.Figure:
     )
 
     # Use softer, modern colors (teal/coral)
-    colors = np.where(w["wow"].fillna(0) >= 0, "#69d3f3", "#f347ce")
+    colors = np.where(w["wow"].fillna(0) >= 0,COLOR_ABOVE, COLOR_BELOW)
 
     # Build bar chart
     fig = px.bar(
@@ -359,31 +364,118 @@ def _safe_weekly(df: pd.DataFrame) -> pd.DataFrame:
     d = d.sort_values("date")
     return d
 
-def fig_stores_desc(df: pd.DataFrame, height: int = 520):
-    d = _safe_weekly(df)
-    if d.empty or "store" not in d: 
-        return px.bar(pd.DataFrame({"store":[],"sales":[]}), x="sales", y="store", orientation="h")
-    g = (d.groupby("store", as_index=False)["weekly_sales"]
+def _aggregate_and_color(df: pd.DataFrame, cat_col: str, val_col: str):
+    """
+    Group by cat_col, sum val_col, sort descending, compute avg and colors.
+    Returns (agg_df, avg, colors).
+    """
+    if df is None or df.empty or {cat_col, val_col} - set(df.columns):
+        return pd.DataFrame(columns=[cat_col, val_col]), 0.0, []
+
+    g = (df.dropna(subset=[val_col])
+           .groupby(cat_col, as_index=False)[val_col]
            .sum()
-           .rename(columns={"weekly_sales":"sales"})
-           .sort_values("sales", ascending=True))  # ascending=True for horiz bars top at right
-    fig = px.bar(g, x="sales", y="store", orientation="h",
-                 title="Store Performance (Total Sales)")
-    fig.update_layout(height=height, xaxis_title="Sales ($)", yaxis_title=None, showlegend=False)
+           .sort_values(val_col, ascending=False))
+
+    avg = g[val_col].mean() if not g.empty else 0.0
+    colors = np.where(g[val_col] >= avg, COLOR_ABOVE, COLOR_BELOW).tolist()
+    return g, float(avg), colors
+
+def fig_benchmark_bars(
+    df: pd.DataFrame,
+    cat_col: str,
+    val_col: str = "weekly_sales",
+    title: str = "Benchmark",
+    height: int = 420,
+) -> go.Figure:
+    """
+    Vertical bar chart with average reference line and conditional coloring.
+    - Bars sorted descending
+    - Blue above avg, Pink below avg
+    - Average line labeled
+    """
+    g, avg, colors = _aggregate_and_color(df, cat_col, val_col)
+    if g.empty:
+        return go.Figure()
+
+    # variance vs avg for hover
+    variance = g[val_col] - avg
+    variance_pct = np.where(avg == 0, 0, variance / avg)
+
+    fig = go.Figure()
+
+    fig.add_bar(
+        x=g[cat_col],
+        y=g[val_col],
+        marker_color=colors,
+        hovertemplate=(
+            f"<b>%{{x}}</b><br>{val_col.replace('_', ' ').title()}: $%{{y:,.0f}}"
+            "<br>Δ vs Avg: $%{customdata[0]:,.0f} (%{customdata[1]:+.1%})<extra></extra>"
+        ),
+        customdata=np.stack([variance, variance_pct], axis=1),
+    )
+
+    # Average reference line
+    fig.add_hline(
+        y=avg,
+        line_dash="dot",
+        line_color=COLOR_AVG,
+        annotation_text=f"Avg: ${avg/1000:,.1f}K",
+        annotation_position="top right",   # moved to right side
+        annotation_font=dict(color=COLOR_AVG, size=12, family="Inter, sans-serif"),
+    )
+
+    fig.update_layout(
+        title=title,
+        height=height,
+        margin=dict(l=40, r=20, t=60, b=40),
+        xaxis_title=None,
+        yaxis_title="Sales ($)",
+        hovermode="x unified",
+    )
     return fig
 
-def fig_departments_desc(df: pd.DataFrame, height: int = 520):
-    d = _safe_weekly(df)
-    if d.empty or "department" not in d:
-        return px.bar(pd.DataFrame({"department":[],"sales":[]}), x="sales", y="department", orientation="h")
-    g = (d.groupby("department", as_index=False)["weekly_sales"]
+def fig_store_benchmark(df: pd.DataFrame, height: int = 420) -> go.Figure:
+    # Backward compatibility if dataset uses 'weekly_sales'
+    return fig_benchmark_bars(
+        df=df,
+        cat_col="store",
+        val_col="weekly_sales",
+        title="Store Rankings (Total Sales vs Avg)",
+        height=height,
+    )
+
+def fig_department_benchmark(df: pd.DataFrame, height: int = 420) -> go.Figure:
+    return fig_benchmark_bars(
+        df=df,
+        cat_col="department",
+        val_col="weekly_sales",
+        title="Department Rankings (Total Sales vs Avg)",
+        height=height,
+    )
+
+def _share_topn(df: pd.DataFrame, cat_col: str, val_col: str, top_n: int = 5):
+    if df is None or df.empty or {cat_col, val_col} - set(df.columns):
+        return pd.DataFrame(columns=[cat_col, val_col, "share"])
+    g = (df.dropna(subset=[val_col])
+           .groupby(cat_col, as_index=False)[val_col]
            .sum()
-           .rename(columns={"weekly_sales":"sales"})
-           .sort_values("sales", ascending=True))
-    fig = px.bar(g, x="sales", y="department", orientation="h",
-                 title="Department Performance (Total Sales)")
-    fig.update_layout(height=height, xaxis_title="Sales ($)", yaxis_title=None, showlegend=False)
-    return fig
+           .sort_values(val_col, ascending=False))
+    total = g[val_col].sum()
+    if total == 0:
+        g["share"] = 0.0
+        return g.iloc[:top_n, :].copy()
+
+    top = g.iloc[:top_n, :].copy()
+    top["share"] = top[val_col] / total
+
+    # collapse the remainder into "Others"
+    if len(g) > top_n:
+        others_val = g.iloc[top_n:, :][val_col].sum()
+        if others_val > 0:
+            top = pd.concat([top, pd.DataFrame({cat_col:["Others"], val_col:[others_val], "share":[others_val/total]})])
+
+    return top.reset_index(drop=True)
 
 def table_store_4wk_change(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -419,3 +511,149 @@ def table_store_4wk_change(df: pd.DataFrame) -> pd.DataFrame:
     t["prev_4w"] = t["prev_4w"].round(0).astype(int)
 
     return t[["store","last_4w","prev_4w","Δ vs prev 4w"]]
+
+
+# Add to plots.py
+
+def fig_regional_growth_comparison(df: pd.DataFrame, height: int = 360) -> go.Figure:
+    """Regional sales with growth overlay - shows both volume and momentum"""
+    ok, d = _weekly_guard(df, {"region", "weekly_sales", "date"})
+    if not ok:
+        return go.Figure()
+    
+    # Calculate regional totals and growth
+    regional = d.groupby(["region", pd.Grouper(key="date", freq="W")], as_index=False)["weekly_sales"].sum()
+    
+    # Get latest total by region
+    latest_totals = regional.groupby("region").tail(1)
+    latest_totals = latest_totals.sort_values("weekly_sales", ascending=False)
+    
+    # Calculate WoW growth
+    regional["prev"] = regional.groupby("region")["weekly_sales"].shift(1)
+    regional["growth"] = (regional["weekly_sales"] - regional["prev"]) / regional["prev"] * 100
+    latest_growth = regional.groupby("region").tail(1)
+    
+    # Merge
+    combined = latest_totals.merge(
+        latest_growth[["region", "growth"]],
+        on="region",
+        how="left"
+    )
+    
+    fig = go.Figure()
+    
+    # Bars for total sales
+    fig.add_trace(go.Bar(
+        x=combined["region"],
+        y=combined["weekly_sales"],
+        name="Total Sales",
+        marker_color="#3b82f6",
+        yaxis="y"
+    ))
+    
+    # Line for growth
+    fig.add_trace(go.Scatter(
+        x=combined["region"],
+        y=combined["growth"],
+        name="Growth %",
+        mode="lines+markers",
+        marker=dict(size=10, color="#22c55e"),
+        line=dict(width=3, color="#22c55e"),
+        yaxis="y2"
+    ))
+    
+    fig.update_layout(
+        title="Regional Performance: Sales Volume & Growth",
+        height=height,
+        yaxis=dict(title="Sales ($)"),
+        yaxis2=dict(
+            title="Growth (%)",
+            overlaying="y",
+            side="right",
+            zeroline=True,
+            zerolinecolor="#94a3b8",
+            zerolinewidth=2
+        ),
+        hovermode="x unified"
+    )
+    
+    return fig
+
+
+def fig_department_trends_small_multiples(df: pd.DataFrame, height: int = 400) -> go.Figure:
+    """Show all departments as small multiple trends for pattern recognition"""
+    ok, d = _weekly_guard(df, {"date", "department", "weekly_sales"})
+    if not ok:
+        return go.Figure()
+    
+    weekly = d.groupby(["department", pd.Grouper(key="date", freq="W")], as_index=False)["weekly_sales"].sum()
+    
+    depts = sorted(weekly["department"].unique())
+    
+    fig = px.line(
+        weekly,
+        x="date",
+        y="weekly_sales",
+        facet_col="department",
+        facet_col_wrap=3,
+        height=height
+    )
+    
+    fig.update_traces(line_color="#635BFF", line_width=2)
+    fig.update_xaxes(title=None, showgrid=False)
+    fig.update_yaxes(title="Sales", matches=None)
+    fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+    
+    fig.update_layout(
+        title="Department Trends (All Departments)",
+        showlegend=False,
+        margin=dict(t=60, l=40, r=20, b=30)
+    )
+    
+    return fig
+
+
+def fig_store_efficiency_scatter(df: pd.DataFrame, height: int = 400) -> go.Figure:
+    """Scatter plot: Avg Transaction Value vs Transaction Volume by store"""
+    need = {"store", "weekly_sales", "transactions"}
+    if df is None or df.empty or need - set(df.columns):
+        return go.Figure()
+    
+    store_metrics = df.groupby("store").agg({
+        "weekly_sales": "sum",
+        "transactions": "sum"
+    }).reset_index()
+    
+    store_metrics["avg_transaction_value"] = (
+        store_metrics["weekly_sales"] / store_metrics["transactions"]
+    )
+    
+    fig = px.scatter(
+        store_metrics,
+        x="transactions",
+        y="avg_transaction_value",
+        text="store",
+        size="weekly_sales",
+        title="Store Efficiency: Transaction Volume vs Average Value",
+        labels={
+            "transactions": "Total Transactions",
+            "avg_transaction_value": "Avg Transaction Value ($)"
+        },
+        height=height
+    )
+    
+    fig.update_traces(
+        textposition="top center",
+        marker=dict(color="#8b5cf6", line=dict(width=2, color="white"))
+    )
+    
+    # Add quadrant lines
+    median_txns = store_metrics["transactions"].median()
+    median_value = store_metrics["avg_transaction_value"].median()
+    
+    fig.add_vline(x=median_txns, line_dash="dash", line_color="#64748b", opacity=0.5)
+    fig.add_hline(y=median_value, line_dash="dash", line_color="#64748b", opacity=0.5)
+    
+    fig.update_layout(height=height)
+    
+    return fig
