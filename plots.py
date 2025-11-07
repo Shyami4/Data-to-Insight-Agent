@@ -38,39 +38,110 @@ def _weekly_guard(df, need):
 
 # ----------------------- Overview ------------------------
 
-def fig_sales_trend_forecast_shaded(weekly_dict, height=240, horizon=2) -> go.Figure:
-    """Trend with 4-wk MA and shaded simple forecast (extending last MA)."""
-    w = pd.DataFrame(weekly_dict)
-    if w.empty or "date" not in w.columns:
-        return go.Figure()
-    w["date"] = pd.to_datetime(w["date"], errors="coerce")
-    ycol = "weekly_sales_sum" if "weekly_sales_sum" in w.columns else w.columns[-1]
-    w = w.dropna(subset=["date", ycol]).sort_values("date")
-    if w.empty:
-        return go.Figure()
-
-    w["ma4"] = w[ycol].rolling(4, min_periods=1).mean()
+def fig_sales_trend_with_stores(
+    kpis_weekly: dict,
+    df_source: pd.DataFrame = None,
+    show_stores: bool = False,
+    height: int = 400
+):
+    """
+    Sales trend with optional store-level breakdown.
+    IMPROVED: Better legend placement and more visible store lines.
+    """
+    # Main aggregated data
+    df_agg = pd.DataFrame(kpis_weekly)
+    if df_agg.empty or "date" not in df_agg or "weekly_sales_sum" not in df_agg:
+        return px.line(title="No data")
+    
+    df_agg["date"] = pd.to_datetime(df_agg["date"])
+    df_agg = df_agg.sort_values("date")
+    df_agg["ma_4wk"] = df_agg["weekly_sales_sum"].rolling(4, min_periods=1).mean()
+    
     fig = go.Figure()
-    fig.add_scatter(x=w["date"], y=w[ycol], mode="lines+markers", name="Sales")
-    fig.add_scatter(x=w["date"], y=w["ma4"], mode="lines", name="4-wk MA",
-                    line=dict(dash="dash"))
-
-    # shaded forecast: extend last MA forward by horizon weeks
-    last_date = w["date"].iloc[-1]
-    future_dates = pd.date_range(last_date, periods=horizon+1, freq="W", inclusive="right")
-    if len(future_dates) > 0:
-        last_ma = float(w["ma4"].iloc[-1])
-        fig.add_scatter(
-            x=list(future_dates), y=[last_ma]*len(future_dates),
-            name="Forecast", line=dict(width=0), fill="tozeroy",
-            fillcolor="rgba(99,91,255,.15)", mode="lines"
-        )
-
+    
+    # If show_stores and we have source data, add store lines
+    if show_stores and df_source is not None and not df_source.empty:
+        if {"date", "store", "weekly_sales"}.issubset(df_source.columns):
+            df_stores = df_source.copy()
+            df_stores["date"] = pd.to_datetime(df_stores["date"], errors="coerce")
+            df_stores = df_stores.dropna(subset=["date"])
+            
+            # Group by store and week
+            store_weekly = (
+                df_stores.groupby(["store", pd.Grouper(key="date", freq="W")])
+                ["weekly_sales"].sum()
+                .reset_index()
+                .sort_values("date")
+            )
+            
+            # IMPROVED: More visible colors and thicker lines
+            store_colors = {
+                "Store_1": "#8b5cf6",  # Purple
+                "Store_2": "#ec4899",  # Pink
+                "Store_3": "#14b8a6",  # Teal
+                "Store_4": "#f59e0b",  # Amber
+                "Store_5": "#06b6d4",  # Cyan
+            }
+            
+            for store in sorted(store_weekly["store"].unique()):
+                store_data = store_weekly[store_weekly["store"] == store]
+                
+                # Get color for this store
+                color = store_colors.get(store, "#94a3b8")
+                
+                fig.add_trace(go.Scatter(
+                    x=store_data["date"],
+                    y=store_data["weekly_sales"],
+                    mode="lines",
+                    name=store,
+                    line=dict(
+                        color=color,
+                        width=2,          # CHANGED: from 1 to 2 (thicker)
+                        dash="dot"
+                    ),
+                    opacity=0.7          # CHANGED: from 0.5 to 0.7 (more visible)
+                ))
+    
+    # Total sales line (on top, most prominent)
+    fig.add_trace(go.Scatter(
+        x=df_agg["date"],
+        y=df_agg["weekly_sales_sum"],
+        mode="lines+markers",
+        name="Total Sales",
+        line=dict(color="#69d3f3", width=3),
+        marker=dict(size=7)
+    ))
+    
+    # 4-week MA
+    fig.add_trace(go.Scatter(
+        x=df_agg["date"],
+        y=df_agg["ma_4wk"],
+        mode="lines",
+        name="4-week Moving Avg",
+        line=dict(color="#fbbf24", width=2.5, dash="dash")  # Brighter yellow
+    ))
+    
+    title = "Sales Trend + 4-Week Moving Average" + (" (by Store)" if show_stores else "")
+    
     fig.update_layout(
-        title="Sales Trend + 4-Week MA (2-week shaded forecast)",
-        height=height, margin=dict(l=10, r=10, t=30, b=10),
-        xaxis_title="Week", yaxis_title="Sales ($)", hovermode="x unified"
+        title=title,
+        xaxis_title="Week",
+        yaxis_title="Sales ($)",
+        template="plotly_dark",
+        height=height,
+        hovermode="x unified",
+        legend=dict(
+            # CHANGED: Move to top right corner
+            yanchor="top",
+            y=0.98,           # Near top
+            xanchor="right",  # CHANGED: from "left" to "right"
+            x=0.98,           # CHANGED: from 0.01 to 0.98 (right side)
+            bgcolor="rgba(0, 0, 0, 0.5)",  # Semi-transparent background
+            bordercolor="#334155",
+            borderwidth=1
+        )
     )
+    
     return fig
 
 def fig_wow_bars(weekly_dict: dict, height=280) -> go.Figure:
@@ -164,96 +235,181 @@ def fig_bottom_departments(df: pd.DataFrame, bottom_n=3) -> go.Figure:
 
 # ------------------ Drivers & Performance ------------------
 
-def fig_regional_share(df: pd.DataFrame, height=360) -> go.Figure:
-    ok, d = _weekly_guard(df, {"region", "weekly_sales", "date"})
-    if not ok: return go.Figure()
-    g = d.groupby("region", as_index=False)["weekly_sales"].sum()
-    total = g["weekly_sales"].sum()
-    g["share"] = g["weekly_sales"] / (total if total else 1)
-    fig = px.bar(g.sort_values("share", ascending=False),
-                 x="region", y="share",
-                 title="Regional Contribution (% of total)",
-                 labels={"region":"Region","share":"Share"})
-    fig.update_yaxes(tickformat=".0%")
-    fig.update_layout(height=height, showlegend=False)
-    return fig
-
-def fig_dept_pareto(df: pd.DataFrame, height=360) -> go.Figure:
-    ok, d = _weekly_guard(df, {"department", "weekly_sales", "date"})
-    if not ok: return go.Figure()
-    d2 = (d.groupby("department", as_index=False)["weekly_sales"].sum()
-            .sort_values("weekly_sales", ascending=False))
-    d2["cum_share"] = d2["weekly_sales"].cumsum() / d2["weekly_sales"].sum()
-    fig = go.Figure()
-    fig.add_bar(x=d2["department"], y=d2["weekly_sales"], name="Sales")
-    fig.add_scatter(x=d2["department"], y=d2["cum_share"], name="Cumulative %",
-                    yaxis="y2", line=dict(dash="dash"))
+# 1. REGIONAL DONUT CHART
+def fig_regional_donut(result_dict: dict, height: int = 400):
+    """
+    Create regional contribution donut chart.
+    """
+    import plotly.graph_objects as go
+    
+    regional = result_dict.get("regional", {})
+    if not regional:
+        return go.Figure().update_layout(
+            title="No regional data available",
+            template="plotly_dark",
+            height=height
+        )
+    
+    regions = list(regional.keys())
+    sales = [regional[r].get("sales", 0) for r in regions]
+    
+    # Color scheme
+    colors = ["#69d3f3", "#8b5cf6", "#f547ce", "#14b8a6", "#f59e0b"]
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=regions,
+        values=sales,
+        hole=0.5,  # Makes it a donut
+        marker=dict(colors=colors[:len(regions)]),
+        textposition="inside",
+        textinfo="label+percent",
+        textfont=dict(size=14, color="white", family="Arial"),
+        hovertemplate="<b>%{label}</b><br>$%{value:,.0f}<br>%{percent}<extra></extra>"
+    )])
+    
+    # Center annotation
+    total = sum(sales)
+    fig.add_annotation(
+        text=f"<b>${total:,.0f}</b><br><span style='font-size:12px'>Total Revenue</span>",
+        x=0.5, y=0.5,
+        font=dict(size=20, color="white"),
+        showarrow=False
+    )
+    
     fig.update_layout(
-        title="Department 80/20 (Pareto)", height=height,
-        yaxis=dict(title="Sales ($)"),
-        yaxis2=dict(title="Share", overlaying="y", side="right", tickformat=".0%")
+        title="Revenue Distribution by Region",
+        template="plotly_dark",
+        height=height,
+        showlegend=True,
+        legend=dict(
+            orientation="v",
+            yanchor="bottom",
+            y=0.5,
+            xanchor="left",
+            x=0
+        )
     )
+    
     return fig
 
-def fig_dept_sparklines_top3(df: pd.DataFrame, k: int = 3, height: int = 280):
-    need = {"date", "department", "weekly_sales"}
-    ok, d = _weekly_guard(df, need)
-    if not ok: return go.Figure()
 
-    weekly = (d.groupby(["department", pd.Grouper(key="date", freq="W")], as_index=False)
-                ["weekly_sales"].sum())
+# 2. DEPARTMENT PARETO CHART (UPDATE EXISTING OR ADD)
+def fig_department_pareto(departments: dict, height: int = 400):
+    """
+    Pareto chart (80/20) for departments with a top-left legend and clear 80% markers.
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-    top_names = (weekly.groupby("department", as_index=False)["weekly_sales"]
-                      .sum().sort_values("weekly_sales", ascending=False)
-                      .head(k)["department"].tolist())
-    if not top_names:
-        return go.Figure()
+    if not departments:
+        return go.Figure().update_layout(
+            title="No department data available",
+            template="plotly_dark",
+            height=height
+        )
 
-    top = weekly[weekly["department"].isin(top_names)].copy()
-    cat_order = pd.Categorical(top["department"], categories=top_names, ordered=True)
-    top = top.assign(department=cat_order).sort_values(["department", "date"])
+    # --- Prepare data (sorted desc by sales)
+    sorted_depts = sorted(departments.items(), key=lambda x: x[1].get("sales", 0), reverse=True)
+    dept_names = [d[0] for d in sorted_depts]
+    sales = [d[1].get("sales", 0) for d in sorted_depts]
 
-    fig = px.line(
-        top, x="date", y="weekly_sales", color=None, facet_row="department",
-        height=max(height, 220 + 60*(len(top_names)-1))
+    total = sum(sales) if sum(sales) else 1.0
+    cumulative_pct = []
+    cumsum = 0
+    for s in sales:
+        cumsum += s
+        cumulative_pct.append(cumsum / total * 100)
+
+    # --- Where do we hit 80%?
+    eighty_idx = next((i for i, p in enumerate(cumulative_pct) if p >= 80), len(cumulative_pct) - 1)
+    eighty_dept = dept_names[eighty_idx]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Bars: Sales
+    fig.add_trace(
+        go.Bar(
+            x=dept_names,
+            y=sales,
+            name="Sales",
+            marker=dict(color="#69d3f3"),
+            hovertemplate="<b>%{x}</b><br>Sales: $%{y:,.0f}<extra></extra>",
+        ),
+        secondary_y=False,
     )
-    fig.update_traces(line=dict(width=2))
-    fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-    fig.update_yaxes(title="Sales ($)", matches=None, showgrid=True)
-    fig.update_xaxes(title=None, showgrid=False)
+
+    # Line: Cumulative %
+    fig.add_trace(
+        go.Scatter(
+            x=dept_names,
+            y=cumulative_pct,
+            name="Cumulative %",
+            mode="lines+markers",
+            line=dict(color="#f59e0b", width=3, dash="dash"),
+            marker=dict(size=8),
+            hovertemplate="<b>%{x}</b><br>Cumulative: %{y:.1f}%<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    # Horizontal 80% target (secondary axis)
+    fig.add_hline(
+        y=80,
+        line_dash="dot",
+        line_color="#ef4444",
+        secondary_y=True,
+    )
+    fig.add_annotation(
+        xref="paper", yref="y2",
+        x=1.0, y=80,
+        text="80% Target",
+        showarrow=False,
+        font=dict(color="#ef4444", size=12),
+        xanchor="right", yanchor="bottom",
+        bgcolor="rgba(0,0,0,0)"
+    )
+
+    # # Vertical line where 80% is reached
+    # fig.add_vline(
+    #     x=eighty_idx,
+    #     line_dash="dot",
+    #     line_color="#94a3b8",
+    #     opacity=0.8,
+    # )
+    # fig.add_annotation(
+    #     x=eighty_idx, y=0, yref="paper",
+    #     text=f"Top {eighty_idx+1} depts → 80%",
+    #     showarrow=False,
+    #     yanchor="bottom",
+    #     font=dict(color="#94a3b8", size=12),
+    #     bgcolor="rgba(0,0,0,0)"
+    # )
+
+    # Axes / layout
+    fig.update_xaxes(title_text="Department")
+    fig.update_yaxes(title_text="Sales ($)", secondary_y=False)
+    fig.update_yaxes(title_text="Cumulative %", secondary_y=True, range=[0, 105])
+
     fig.update_layout(
-        title="Top Departments – Weekly Trends",
-        showlegend=False, margin=dict(l=40, r=20, t=60, b=30),
-        hovermode="x unified"
+        title="Department 80/20 (Pareto)",
+        template="plotly_dark",
+        height=height,
+        hovermode="x unified",
+        # Legend placed top-left, outside plotting area
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,          # push above chart area
+            xanchor="left",
+            x=1.02,
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(size=12, color="white"),
+        ),
+        margin=dict(t=80, r=40, b=40, l=60),  # extra top margin for the legend row
     )
+
     return fig
 
-def fig_store_consistency_heatmap(df: pd.DataFrame, missing_only=False, height=360) -> go.Figure:
-    need = {"date", "store", "weekly_sales"}
-    ok, d = _weekly_guard(df, need)
-    if not ok: return go.Figure()
-
-    pivot = d.pivot_table(
-        index="store",
-        columns=d["date"].dt.to_period("W"),
-        values="weekly_sales",
-        aggfunc="sum"
-    )
-
-    if missing_only:
-        pivot = pivot.isna().astype(int)
-        title = "Missing Sales Heatmap (dark = more missing)"
-        colors = "Reds"
-    else:
-        title = "Store × Week Heatmap (Sales)"
-        colors = "Blues"
-
-    pivot = pivot.fillna(0)
-    pivot.columns = [p.start_time for p in pivot.columns]  # Period → timestamp
-
-    fig = px.imshow(pivot, color_continuous_scale=colors, aspect="auto")
-    fig.update_layout(height=height, title=title, xaxis_title="Week", yaxis_title="Store")
-    return fig
 
 # ---------------- Diagnostics & Efficiency ----------------
 

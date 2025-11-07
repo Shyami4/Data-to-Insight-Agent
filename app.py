@@ -6,27 +6,25 @@ import time
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
 
-from analytics_pipeline import load_rules, compute_kpis
-from narrative import draft_page_summary  
+from textwrap import dedent
+from analytics_pipeline import load_rules, compute_kpis, validate_dataframe, flag_outliers_iqr
+from narrative import draft_page_summary , draft_drivers_summary
 import json
 import hashlib
+import re
 from narrative import micro_insight
 
 # Plots you expose in plots.py
 from plots import (
     # Overview
-    _sparkline, 
-    kpi_value_and_delta_vs_py,
-    fig_sales_trend_forecast_shaded,
+    fig_sales_trend_with_stores,
     fig_wow_bars,
     fig_store_benchmark,
     fig_department_benchmark,
     table_store_4wk_change,
     # Drivers & Performance
-    fig_regional_share,
-    fig_dept_pareto,
-    fig_dept_sparklines_top3,
-    fig_store_consistency_heatmap,
+    fig_regional_donut,
+    fig_department_pareto,
     # Diagnostics & Efficiency
     fig_efficiency_quadrants_r2,
     outlier_table_iqr,
@@ -85,6 +83,10 @@ st.markdown("""
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     border: 1px solid #334155;
     transition: all 0.3s ease;
+    min-height: 210px;           
+    display: flex;                
+    flex-direction: column;     
+    justify-content: flex-start;
 }
 .card:hover {
     border-color: #635BFF;
@@ -246,6 +248,15 @@ st.markdown("""
   box-shadow:0 6px 18px rgba(0,0,0,.25);
   margin-top:10px;
 }
+            
+/* Better list formatting */
+.ai-summary-card ol { margin:0 0 8px 18px; padding-left: 0; }
+.ai-summary-card ol li { margin:6px 0; color:#cbd5e1; line-height: 1.7; }
+
+/* Prevent markdown rendering issues */
+.ai-summary-card p { margin: 8px 0; line-height: 1.7; }
+.ai-summary-card strong { font-weight: 700; }
+.ai-summary-card em { font-style: italic; }
 
 /* card header */
 .ai-summary-header{
@@ -274,6 +285,7 @@ ss.setdefault("df", None)
 ss.setdefault("result", None)
 ss.setdefault("insights", None)
 ss.setdefault("filters", {"store":"All", "department":"All", "region":"All"})
+ss.setdefault("page_summary_cache", {})
 rules = load_rules()
 
 # ---------- REUSABLE HEADER COMPONENT ----------
@@ -330,6 +342,7 @@ def _recompute(df_source: pd.DataFrame):
     with st.spinner("AI analyzing your data..."):
         ss.result = compute_kpis(df_source, rules)
         ss.insights = None
+        ss.ai_cache = {}
         time.sleep(0.3)
     st.success("Analysis complete!")
     time.sleep(0.3)
@@ -339,6 +352,155 @@ def _ensure_data():
     if ss.df is None:
         st.warning("📁 Please upload a dataset first in **Upload Data** page.", icon="⚠️")
         st.stop()
+
+def validate_data_with_pipeline(df: pd.DataFrame, rules: dict) -> dict:
+    
+    quality_report = {
+        "status": "excellent",
+        "completeness": 100.0,
+        "missing_count": 0,
+        "outliers": pd.DataFrame(),
+        "issues": [],
+        "warnings": [],
+        "stats": {},
+        "validation_passed": True,
+        "pipeline_report": None
+    }
+    
+    # Use analytics_pipeline validation
+    try:
+        df_validated, pipeline_report = validate_dataframe(df, rules)
+        quality_report["pipeline_report"] = pipeline_report
+        
+        # Check for errors from pipeline
+        if pipeline_report.get("errors"):
+            quality_report["validation_passed"] = False
+            quality_report["issues"].extend(pipeline_report["errors"])
+        
+        # Add warnings from pipeline
+        if pipeline_report.get("warnings"):
+            quality_report["warnings"].extend(pipeline_report["warnings"])
+        
+        # Use validated dataframe for further checks
+        df = df_validated
+        
+    except Exception as e:
+        quality_report["issues"].append(f"Validation error: {str(e)}")
+        quality_report["validation_passed"] = False
+        return quality_report
+    
+    # Calculate completeness
+    if not df.empty:
+        total_cells = len(df) * len(df.columns)
+        missing_cells = df.isnull().sum().sum()
+        quality_report["completeness"] = ((total_cells - missing_cells) / total_cells * 100)
+        quality_report["missing_count"] = int(missing_cells)
+    
+    # Outlier detection using pipeline function
+    if not df.empty and "weekly_sales" in df.columns:
+        try:
+            outlier_config = rules.get("outliers", {})
+            df_with_outliers = flag_outliers_iqr(
+                df,
+                col="weekly_sales",
+                group_by=outlier_config.get("group_by", "store"),
+                k=outlier_config.get("k", 1.5)
+            )
+            
+            if "is_outlier" in df_with_outliers.columns:
+                outlier_df = df_with_outliers[df_with_outliers["is_outlier"]]
+                if not outlier_df.empty:
+                    # Select relevant columns for display
+                    display_cols = ["date", "store", "weekly_sales"]
+                    display_cols = [c for c in display_cols if c in outlier_df.columns]
+                    quality_report["outliers"] = outlier_df[display_cols].head(20)
+                    
+                    outlier_count = len(outlier_df)
+                    if outlier_count > 5:
+                        quality_report["warnings"].append(
+                            f"🔍 {outlier_count} outliers detected (review for data quality issues)"
+                        )
+        except Exception as e:
+            quality_report["warnings"].append(f"Outlier detection skipped: {str(e)}")
+    
+    # Business validation from rules
+    validation_rules = rules.get("cleaning", {}).get("validation", {})
+    
+    # Check minimum stores
+    if "store" in df.columns:
+        store_count = df["store"].nunique()
+        min_stores = validation_rules.get("min_stores", 2)
+        quality_report["stats"]["store_count"] = store_count
+        
+        if store_count < min_stores:
+            quality_report["issues"].append(
+                f"⚠️ Only {store_count} stores (minimum {min_stores} required)"
+            )
+            quality_report["validation_passed"] = False
+    
+    # Check minimum weeks
+    if "date" in df.columns:
+        try:
+            dates = pd.to_datetime(df["date"])
+            week_count = dates.dt.to_period('W').nunique()
+            min_weeks = validation_rules.get("min_weeks", 4)
+            quality_report["stats"]["weeks_of_data"] = week_count
+            
+            if week_count < min_weeks:
+                quality_report["issues"].append(
+                    f"⚠️ Only {week_count} weeks (minimum {min_weeks} required for trends)"
+                )
+                quality_report["validation_passed"] = False
+        except:
+            pass
+    
+    # Transaction validation
+    if "transactions" in df.columns and "weekly_sales" in df.columns:
+        # Sales with zero transactions
+        zero_txn_with_sales = ((df["transactions"] == 0) & (df["weekly_sales"] > 0)).sum()
+        if zero_txn_with_sales > 0:
+            quality_report["warnings"].append(
+                f"💡 {zero_txn_with_sales} records have sales but zero transactions"
+            )
+        
+        # Unusually high average transaction
+        avg_txn = df["weekly_sales"] / df["transactions"].replace(0, np.nan)
+        max_avg = validation_rules.get("max_avg_transaction", 50000)
+        high_avg_count = (avg_txn > max_avg).sum()
+        if high_avg_count > 0:
+            quality_report["warnings"].append(
+                f"💡 {high_avg_count} records have avg transaction > ${max_avg:,}"
+            )
+    
+    # Basic stats
+    quality_report["stats"]["total_rows"] = len(df)
+    quality_report["stats"]["total_columns"] = len(df.columns)
+    
+    if "weekly_sales" in df.columns:
+        quality_report["stats"]["total_revenue"] = float(df["weekly_sales"].sum())
+        quality_report["stats"]["avg_weekly_sales"] = float(df["weekly_sales"].mean())
+    
+    if "date" in df.columns:
+        try:
+            dates = pd.to_datetime(df["date"])
+            quality_report["stats"]["date_range_start"] = dates.min().strftime("%Y-%m-%d")
+            quality_report["stats"]["date_range_end"] = dates.max().strftime("%Y-%m-%d")
+        except:
+            pass
+    
+    # Determine overall status
+    completeness = quality_report["completeness"]
+    issues_count = len(quality_report["issues"])
+    warnings_count = len(quality_report["warnings"])
+    
+    if completeness >= 95 and issues_count == 0 and warnings_count <= 2:
+        quality_report["status"] = "excellent"
+    elif completeness >= 85 and issues_count == 0:
+        quality_report["status"] = "good"
+    else:
+        quality_report["status"] = "needs_attention"
+    
+    return quality_report
 
 def _health_status(result_dict: dict) -> tuple[str, str]:
     """Determine health status from trend"""
@@ -439,6 +601,53 @@ def _hash_ctx(ctx: dict) -> str:
     """Create cache key from context"""
     return hashlib.md5(json.dumps(ctx, sort_keys=True, default=str).encode()).hexdigest()
 
+def _clean_markdown_for_display(md: str) -> str:
+    """
+    Clean markdown text to fix rendering issues.
+    ENHANCED: Fixes italic markers, currency symbols, and spacing.
+    """
+    if not md:
+        return ""
+    
+    # CRITICAL: Handle italic markers causing concatenation
+    # Pattern: *text*nextword → *text* nextword
+    md = re.sub(r'\*([^*]+?)\*([a-zA-Z0-9])', r'*\1* \2', md)
+    
+    # Fix specific word concatenation patterns
+    md = re.sub(r'underperformat', 'underperforms at', md)
+    md = re.sub(r'dominat(\s|$)', r'dominates\1', md)
+    
+    # Fix bullet (•) spacing
+    md = re.sub(r'([KM])•', r'\1 • ', md)      # After numbers: 570K•
+    md = re.sub(r'•([A-Z])', r'• \1', md)      # Before capitals: •Dept
+    
+    # CRITICAL: Add $ before numbers missing it
+    # Matches: 570K, 426K but not $570K (already has $)
+    md = re.sub(r'(?<!\$)(?<!\w)(\d+(?:,\d{3})*[KM])\b', r'$\1', md)
+    
+    # Fix spacing around "vs"
+    md = re.sub(r'([KM\)])\s*vs\s*', r'\1 vs ', md)  # Before vs
+    md = re.sub(r'vs\s*([A-Z(])', r'vs \1', md)       # After vs
+    
+    # Fix spacing around parentheses
+    md = re.sub(r'\)([a-zA-Z])', r') \1', md)    # After )
+    md = re.sub(r'([a-zA-Z])\(', r'\1 (', md)    # Before (
+    
+    # Fix em-dash spacing
+    md = re.sub(r'([a-zA-Z0-9])—', r'\1 —', md)
+    md = re.sub(r'—([a-zA-Z])', r'— \1', md)
+    
+    # Fix camelCase separation
+    md = re.sub(r'([a-z])([A-Z])', r'\1 \2', md)
+    
+    # Escape underscores for markdown
+    md = re.sub(r'(?<!\\)_', r'\_', md)
+    
+    # Clean up excessive spaces
+    md = re.sub(r'  +', ' ', md)
+    
+    return md.strip()
+
 def ai_note(title: str, ctx: dict, icon: str = "💡"):
     """Render a tiny AI note below a chart with caching"""
     ss.setdefault("ai_cache", {})
@@ -500,16 +709,6 @@ def _store_4wk_table(df: pd.DataFrame) -> pd.DataFrame:
     tail = agg.sort_values("date").groupby("store").tail(1)
     tail["delta"] = (tail["last_4w"] - tail["prev_4w"]) / tail["prev_4w"].replace(0, np.nan)
     return tail[["store","last_4w","prev_4w","delta"]].rename(columns={"delta":"Δ vs prev 4w"})
-
-
-# --- ATTENTION REQUIRED BOX ---
-def _attention_box(df: pd.DataFrame, result: dict):
-    """Generate attention required alerts"""
-    if df is None or df.empty:
-        return
-    d = _safe_to_datetime(df)
-    if d.empty or "weekly_sales" not in d.columns:
-        return
 
 def _build_page_summary_ctx(df: pd.DataFrame, r: dict) -> dict:
     """Aggregate everything the summary needs from the three sections."""
@@ -579,6 +778,124 @@ def _build_page_summary_ctx(df: pd.DataFrame, r: dict) -> dict:
     ctx["benchmarks"] = bench
     return ctx
 
+def _val_sales(v) -> float:
+    """Return a numeric sales value for dict/number/anything."""
+    if isinstance(v, dict):
+        return float(v.get("sales", 0) or 0)
+    if isinstance(v, (int, float, np.number)):
+        return float(v)
+    return 0.0
+
+def _top_bottom_from_any(obj, df: pd.DataFrame, level: str):
+    """
+    Extract (top_name, top_val, bottom_name, bottom_val) from different shapes.
+    Falls back to computing from df if needed.
+    """
+    # dict-like: {"Store_5": {"sales": ...}, ...} or {"Store_5": 123, ...}
+    if isinstance(obj, dict) and obj:
+        rows = []
+        for k, v in obj.items():
+            s = _val_sales(v)
+            if np.isfinite(s):
+                rows.append((k, s))
+        if rows:
+            rows.sort(key=lambda x: x[1])
+            bottom_name, bottom_val = rows[0]
+            top_name, top_val = rows[-1]
+            return top_name, top_val, bottom_name, bottom_val
+
+    # list of dicts: [{"store":"Store_5","sales":...}, ...]
+    if isinstance(obj, list) and obj:
+        rows = []
+        for it in obj:
+            if isinstance(it, dict):
+                name = it.get(level) or it.get("name") or it.get("label")
+                s = _val_sales(it.get("sales"))
+                if name is not None and np.isfinite(s):
+                    rows.append((name, s))
+        if rows:
+            rows.sort(key=lambda x: x[1])
+            bottom_name, bottom_val = rows[0]
+            top_name, top_val = rows[-1]
+            return top_name, top_val, bottom_name, bottom_val
+
+    # fallback: compute from df
+    if isinstance(df, pd.DataFrame) and not df.empty and level in df.columns and "weekly_sales" in df.columns:
+        s = df.groupby(level)["weekly_sales"].sum()
+        if not s.empty:
+            return s.idxmax(), float(s.max()), s.idxmin(), float(s.min())
+
+    return None, 0.0, None, 0.0
+
+# ---------- AI SUMMARY HELPERS ----------
+def _style_fuchsia_headers(md: str) -> str:
+    """
+    Inside bulleted/numbered lines, convert **Header** into a fuchsia span.
+    Keeps your bullets intact and only styles bold headers.
+    """
+    lines = md.split("\n")
+    out = []
+    for line in lines:
+        if line.strip().startswith(("•", "-", "*", "○", "◦")) or re.match(r"^\s*\d+\.", line):
+            line = re.sub(
+                r"\*\*([^*]+)\*\*",
+                r"<span style='color:#f472b6;font-weight:700;'>\1</span>",
+                line
+            )
+        out.append(line)
+    return "\n".join(out)
+
+def render_ai_summary_block(title: str, ctx: dict, *,
+                            draft_fn,                 
+                            show_toggle: bool = True,
+                            toggle_key: str = "show_ai_summary"):
+    st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
+
+    show = True
+    if show_toggle:
+        show = st.toggle("Show AI Page Summary", value=True, key=toggle_key)
+
+    if not show:
+        return
+
+    # Create cache key
+    cache_key = f"{toggle_key}:{_hash_ctx(ctx)}"
+    
+    # Check cache or generate
+    if cache_key not in ss.page_summary_cache:
+        with st.spinner(" Generating AI summary..."):
+            try:
+                raw_md = draft_fn(ctx) or ""
+                cleaned_md = _clean_markdown_for_display(raw_md)  # NEW
+                styled_md = _style_fuchsia_headers(cleaned_md)
+                ss.page_summary_cache[cache_key] = styled_md
+            except Exception as e:
+                ss.page_summary_cache[cache_key] = f" Unable to generate summary: {str(e)}"
+    
+    md = ss.page_summary_cache[cache_key]
+
+    section_divider(title)
+
+    st.markdown(f"""
+    <div class='ai-summary-card'>
+        {md}
+    </div>
+    """, unsafe_allow_html=True)
+
+    # st.markdown("<hr style='border:0;border-top:1px solid #334155;margin:18px 0 14px;'>",
+    #             unsafe_allow_html=True)
+    # c1, c2, c3 = st.columns(3)
+    # with c1: 
+    #     if st.button("📤 Notify Stakeholders", use_container_width=True, key=f"{toggle_key}_notify"):
+    #         st.success("✅ Notification sent!")
+    # with c2: 
+    #     if st.button("📑 Export Action List",  use_container_width=True, key=f"{toggle_key}_export"):
+    #         st.success("✅ Export complete!")
+    # with c3: 
+    #     if st.button("🗓️ Schedule Follow-up", use_container_width=True, key=f"{toggle_key}_followup"):
+    #         st.success("✅ Meeting scheduled!")
+
+
 # ---------- SIDEBAR NAVIGATION ----------
 with st.sidebar:
     st.markdown("""
@@ -594,7 +911,7 @@ with st.sidebar:
     
     page = option_menu(
         "Navigation",
-        ["Upload Data", "Overview", "Drivers & Performance", "Diagnostics & Efficiency", "AI Insights & Recommendations"],
+        ["Upload Data", "Overview", "Drivers & Performance", "AI Insights & Recommendations"],
         icons=["cloud-upload-fill", "speedometer2", "bar-chart-line-fill", "activity", "stars"],
         default_index=1 if ss.result is not None else 0,
         styles={
@@ -659,6 +976,14 @@ with st.sidebar:
         value=ss.ai_insights_enabled,
         help="Display AI-generated insights below charts"
     )
+
+    # Cache management
+    if st.button("Clear AI Cache", use_container_width=True, help="Clear cached AI summaries"):
+        ss.ai_cache = {}
+        ss.page_summary_cache = {}
+        st.success("Cache cleared!")
+        time.sleep(0.5)
+        st.rerun()
         
     st.markdown("---")
     
@@ -676,25 +1001,28 @@ with st.sidebar:
 if page == "Upload Data":
     page_header(
         title="Upload Your Data",
-        subtitle="Upload CSV or Excel files to unlock AI-powered insights and automated analysis of your sales data",
+        subtitle="Upload CSV or Excel files with automated quality validation and AI-powered analysis",
         gradient_start="#667eea",
         gradient_end="#764ba2"
     )
     
     # Expected format info
-    with st.expander("Expected Data Format", expanded=False):
-        st.markdown("""
-        **Required columns:**
-        - `date` - Date of the sales record (YYYY-MM-DD format)
-        - `store` - Store identifier (e.g., Store_1, Store_2)
-        - `department` - Department identifier (e.g., Dept_1, Dept_2)
-        - `region` - Geographic region (e.g., North, South, East, West)
-        - `weekly_sales` - Sales amount in dollars
-        - `transactions` - Number of transactions
+    with st.expander(" Expected Data Format & Requirements", expanded=False):
+        required_cols = rules.get("dataset", {}).get("required_columns", [])
+        st.markdown(f"""
+        **Required columns:** {', '.join(f'`{c}`' for c in required_cols)}
         
-        **Optional columns:**
-        - `profit` - Profit margin data
-        - `quantity` - Quantity of items sold
+        **Data requirements:**
+        - Minimum 2 stores for comparative analysis
+        - Minimum 4 weeks of historical data
+        - Dates between 2020-01-01 and today
+        - No future dates allowed
+        
+        **Automatic validation:**
+        - Data type checking and conversion
+        - Missing value detection
+        - Outlier identification (IQR method)
+        - Business rule verification
         """)
     
     # File uploader
@@ -705,61 +1033,204 @@ if page == "Upload Data":
     )
     
     if file:
-        # File info metrics
+        # File info
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("File Name", file.name)
+            st.metric(" File Name", file.name)
         with col2:
-            st.metric("File Size", f"{file.size / 1024:.1f} KB")
+            st.metric(" Size", f"{file.size / 1024:.1f} KB")
         with col3:
-            file_type = "CSV" if file.name.endswith(".csv") else "Excel"
-            st.metric("File Type", file_type)
+            st.metric(" Type", "CSV" if file.name.endswith(".csv") else "Excel")
         
         st.markdown("---")
         
-        # Load and validate data
+        # Load and validate
         try:
-            with st.spinner("Reading file..."):
+            with st.spinner(" Loading and validating your data..."):
                 df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
                 time.sleep(0.2)
+                
+                # Run validation using pipeline
+                quality = validate_data_with_pipeline(df, rules)
+            
+            # ═══════════════════════════════════════════════════════════
+            # QUALITY DASHBOARD
+            # ═══════════════════════════════════════════════════════════
+            
+            st.markdown("###  Data Quality Dashboard")
+            
+            # Quality cards
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                completeness = quality["completeness"]
+                st.metric(
+                    "Completeness",
+                    f"{completeness:.1f}%",
+                    delta="Excellent" if completeness >= 95 else "Good" if completeness >= 85 else "Check",
+                    delta_color="normal" if completeness >= 85 else "inverse"
+                )
+            
+            with col2:
+                missing = quality["missing_count"]
+                st.metric(
+                    "Missing Values",
+                    f"{missing:,}",
+                    delta="Good" if missing < 50 else "Review",
+                    delta_color="normal" if missing < 50 else "inverse"
+                )
+            
+            with col3:
+                outlier_count = len(quality["outliers"]) if not quality["outliers"].empty else 0
+                st.metric(
+                    "Outliers",
+                    f"{outlier_count}",
+                    delta="Normal" if outlier_count < 10 else "Check",
+                    delta_color="normal" if outlier_count < 10 else "inverse"
+                )
+            
+            with col4:
+                status = quality["status"]
+                status_map = {
+                    "excellent": {"color": "#22c55e", "label": "✅ Excellent"},
+                    "good": {"color": "#f59e0b", "label": "⚠️ Good"},
+                    "needs_attention": {"color": "#ef4444", "label": "❌ Review"}
+                }
+                s = status_map.get(status, {"color": "#94a3b8", "label": status})
+                
+                st.markdown(f"""
+                <div style="
+                    background: {s['color']}22;
+                    border: 2px solid {s['color']};
+                    border-radius: 10px;
+                    padding: 12px;
+                    text-align: center;
+                ">
+                    <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 4px;">Status</div>
+                    <div style="font-size: 1.2rem; font-weight: 700; color: {s['color']};">{s['label']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Issues and warnings
+            if quality["issues"] or quality["warnings"]:
+                st.markdown("####  Validation Report")
+                
+                if quality["issues"]:
+                    st.error("**Critical Issues** (must be fixed):")
+                    for issue in quality["issues"]:
+                        st.markdown(f"• {issue}")
+                
+                if quality["warnings"]:
+                    st.warning("**Warnings** (review recommended):")
+                    for warning in quality["warnings"]:
+                        st.markdown(f"• {warning}")
+            else:
+                st.success(" **No issues detected!** Your data passed all quality checks.")
+            
+            # Expandable details
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if not quality["outliers"].empty:
+                    with st.expander(f" View {len(quality['outliers'])} Outliers", expanded=False):
+                        st.dataframe(
+                            quality["outliers"].style.format(
+                                {"weekly_sales": "${:,.0f}"} if "weekly_sales" in quality["outliers"].columns else {}
+                            ),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        st.caption(f"💡 Detection: {rules.get('outliers', {}).get('method', 'IQR').upper()} method with k={rules.get('outliers', {}).get('k', 1.5)}")
+            
+            with col2:
+                if quality["missing_count"] > 0:
+                    with st.expander(f" Missing Values Detail", expanded=False):
+                        missing_by_col = df.isnull().sum()
+                        missing_by_col = missing_by_col[missing_by_col > 0]
+                        
+                        if not missing_by_col.empty:
+                            missing_df = pd.DataFrame({
+                                "Column": missing_by_col.index,
+                                "Count": missing_by_col.values,
+                                "%": (missing_by_col.values / len(df) * 100).round(2)
+                            })
+                            st.dataframe(missing_df, use_container_width=True, hide_index=True)
+                            
+                            # Show policy from rules
+                            null_policy = rules.get("cleaning", {}).get("null_policy", {})
+                            if null_policy:
+                                st.caption("**Handling Policy:**")
+                                for col, policy in null_policy.items():
+                                    if col in missing_by_col.index:
+                                        st.caption(f"• `{col}`: {policy.replace('_', ' ')}")
+            
+            st.markdown("---")
             
             # Data preview
-            st.subheader("Data Preview")
+            st.markdown("###  Data Preview")
             st.dataframe(df.head(25), use_container_width=True, height=400)
             
-            # Stats
-            col1, col2, col3 = st.columns(3)
+            # Statistics
+            col1, col2, col3, col4 = st.columns(4)
+            
             with col1:
-                st.metric("Total Rows", f"{len(df):,}")
+                st.metric(" Records", f"{quality['stats']['total_rows']:,}")
+            
             with col2:
-                st.metric("Total Columns", len(df.columns))
+                st.metric(" Columns", quality['stats']['total_columns'])
+            
             with col3:
-                missing_pct = (df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100)
-                st.metric("Data Quality", f"{100-missing_pct:.1f}%")
+                stores = quality['stats'].get('store_count', 'N/A')
+                st.metric(" Stores", stores)
             
-            # Validate
-            required_cols = {"date", "store", "department", "region", "weekly_sales", "transactions"}
-            missing_cols = required_cols - set(df.columns)
+            with col4:
+                if "total_revenue" in quality['stats']:
+                    revenue = quality['stats']['total_revenue']
+                    if revenue >= 1_000_000:
+                        st.metric(" Revenue", f"${revenue/1_000_000:.1f}M")
+                    else:
+                        st.metric(" Revenue", f"${revenue/1000:.0f}K")
             
-            if missing_cols:
-                st.error(f"Missing required columns: {', '.join(missing_cols)}")
-            else:
-                st.success("All required columns found!")
+            # Show date range if available
+            if "date_range_start" in quality['stats']:
+                st.caption(f" Date Range: {quality['stats']['date_range_start']} to {quality['stats']['date_range_end']}")
+            
+            st.markdown("---")
+            
+            # Analyze button
+            if quality["validation_passed"]:
+                st.success(" **Ready to analyze!** All validation checks passed.")
                 
-                # Analyze button
+                st.markdown("<br>", unsafe_allow_html=True)
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
-                    if st.button("Start AI Analysis", type="primary", use_container_width=True):
-                        with st.spinner("Processing your data..."):
+                    if st.button(" Start AI Analysis", type="primary", use_container_width=True):
+                        with st.spinner(" AI analyzing your data..."):
                             ss.df = df
                             time.sleep(0.5)
                             _recompute(_filter_df(df))
-                        st.success("Analysis complete! Navigate to **Overview** to see results.")
+                        
+                        st.success(" **Analysis complete!** Navigate to **Overview** for insights.")
                         time.sleep(1.5)
                         st.rerun()
+            else:
+                st.error(" **Cannot analyze.** Fix critical issues above first.")
+                
+                with st.expander("💡 How to Fix"):
+                    st.markdown("""
+                    **Common Solutions:**
+                    1. **Missing columns**: Ensure your file has all required columns
+                    2. **Invalid dates**: Use YYYY-MM-DD format
+                    3. **Insufficient data**: Need minimum 4 weeks and 2 stores
+                    4. **Missing critical values**: Fill or remove rows
+                    
+                    **Need help?** Check "Expected Data Format" above.
+                    """)
         
         except Exception as e:
-            st.error(f"Error reading file: {str(e)}")
+            st.error(f" **Error:** {str(e)}")
+            with st.expander(" Details"):
+                st.code(str(e))
     
     else:
         # Empty state
@@ -773,12 +1244,16 @@ if page == "Upload Data":
             margin: 40px 0;
         ">
             <div style="font-size: 80px; margin-bottom: 20px;">📂</div>
-            <h3 style="color: #cbd5e1; margin: 0 0 12px 0;">No file uploaded yet</h3>
-            <p style="color: #94a3b8; margin: 0; font-size: 1.05rem;">
-                Drag and drop your sales data CSV or Excel file to begin
+            <h3 style="color: #cbd5e1; margin: 0 0 12px 0;">No file uploaded</h3>
+            <p style="color: #94a3b8; margin: 0 0 20px 0; font-size: 1.05rem;">
+                Drag and drop or click to browse
+            </p>
+            <p style="color: #64748b; margin: 0; font-size: 0.9rem;">
+                 Auto-validation •  Outlier detection •  Quality dashboard
             </p>
         </div>
         """, unsafe_allow_html=True)
+
 
 
 # -------- OVERVIEW --------
@@ -797,26 +1272,55 @@ elif page == "Overview":
     r = ss.result
     fdf = _filter_df(ss.df)
     status_color, status_label = _health_status(r)
+    health_status = status_label.split("(")[0].strip()
 
     # KPI Cards
     last4 = _last4_weeks_sales_sum(fdf)
+    tr = r.get("trend_4wk")
+
+    # Calculate total transactions for last 4 weeks
+    if "transactions" in fdf.columns and not fdf.empty:
+        fdf_dated = _safe_to_datetime(fdf)
+        if not fdf_dated.empty:
+            # Get last 4 weeks of transactions
+            weekly_txn = (
+                fdf_dated.set_index("date")
+                .resample("W")["transactions"]
+                .sum()
+                .tail(4)
+            )
+            total_transactions = int(weekly_txn.sum()) if not weekly_txn.empty else 0
+        else:
+            total_transactions = 0
+    else:
+        total_transactions = 0
+
     c1, c2, c3 = st.columns(3)
     
     with c1:
+        avg_revenue_per_week = last4 / 4  # Calculate weekly average
+
         st.markdown(f"""
         <div class='card'>
-            <h3>Total Revenue (Last 4 Weeks)</h3>
-            <div class='v'>${last4:,.0f}</div>
+            <h3>Total Revenue (Last 4-Week)</h3>
+            <div class='v' style='margin: 12px 0;'>${last4:,.0f}</div>
+            <div style='color: #94a3b8; font-size: 0.85rem; margin-top: 14px;'>
+                Avg: ${avg_revenue_per_week:,.0f} per week
+            </div>
         </div>
         """, unsafe_allow_html=True)
     
     with c2:
-        tr = r.get("trend_4wk")
-        tr_txt = "—" if tr is None or (isinstance(tr,float) and np.isnan(tr)) else f"{tr*100:.1f}%"
+        # Calculate average transactions per week
+        avg_txn_per_week = total_transactions / 4 if total_transactions > 0 else 0
+        
         st.markdown(f"""
         <div class='card'>
-            <h3>4-Week Trend</h3>
-            <div class='v'>{tr_txt}</div>
+            <h3>Total Transactions (Last 4-Week)</h3>
+            <div class='v'style='margin: 12px 0;'>{total_transactions:,}</div>
+            <div style='color: #94a3b8; font-size: 0.85rem; margin-top: 14px;'>
+                Avg: {avg_txn_per_week:,.0f} per week
+            </div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -824,23 +1328,55 @@ elif page == "Overview":
         st.markdown(f"""
         <div class='card'>
             <h3>Overall Health</h3>
-            <div class='v'>
+            <div class='v'style='margin: 12px 0;'>
                 <span class='dot {status_color}'></span>{status_label}
+            </div>
+            <div style='color: #94a3b8; font-size: 0.85rem; margin-top: 14px;'>
+                Last 4 weeks vs Prior 4 weeks
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-    insight_box(
-        "This month: **Store_5** is driving growth while **Store_1** data gaps mask revenue. "
-        "Priority: **fix data collection**, then **replicate Store_5's high-value transaction model** in underperformers."
-    )
+    # === AI-POWERED EXECUTIVE INSIGHT ===
+    if ss.get("ai_insights_enabled", True):
+        # Build context
+        executive_ctx = {
+            "total_revenue": float(last4),
+            "trend_4wk_pct": float(tr * 100) if tr is not None and not np.isnan(tr) else 0.0,
+            "total_transactions": total_transactions,
+            "avg_transaction_value": float(last4 / total_transactions) if total_transactions > 0 else 0.0,
+            "health_status": health_status,
+        }
+        
+        # Add store performance
+        stores = r.get("stores", {})
+        if stores:
+            executive_ctx.update({
+                "top_store": stores.get("top_store", "Unknown"),
+                "top_store_sales": float(stores.get("top_store_sales", 0)),
+                "bottom_store": stores.get("bottom_store", "Unknown"),
+                "bottom_store_sales": float(stores.get("bottom_store_sales", 0)),
+                "store_count": stores.get("count", 0),
+            })
+        
+        # Generate AI insight
+        ai_note("Executive Summary Insight", executive_ctx, icon="💡")
+    
 
     # Momentum section
     section_divider("Momentum Analysis")
 
     # Sales trend
+    # Add a toggle checkbox
+    show_stores = st.checkbox("Show store breakdown", value=False)
+
     st.plotly_chart(
-        fig_sales_trend_forecast_shaded(r.get("kpis_weekly", {}), height=420),
+        fig_sales_trend_with_stores(
+            r.get("kpis_weekly", {}),
+            df_source=fdf,
+            show_stores=show_stores,
+            height=420
+        ),
         use_container_width=True
     )
     st.caption("💡 Spikes/dips relative to 4-week Moving Average; shaded area shows 2-Week Forecast")
@@ -890,7 +1426,7 @@ elif page == "Overview":
         st.caption("💡 Blue/pink bars show positive/negative WoW growth—spot acceleration or fatigue")
 
     with col_right:
-        st.markdown("#### 4-Week Store Comparison")
+        st.markdown("###### 4-Week Store Comparison")
         
         t = table_store_4wk_change(fdf)
         if t.empty:
@@ -1015,47 +1551,15 @@ elif page == "Overview":
         }
         ai_note("Performance Benchmark Insights", ctx_benchmark)
 
-
-    # --- Page-level AI Summary
-    st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
-
-show_page_summary = st.toggle("Show AI Page Summary", value=True)
-
-if show_page_summary:
-    page_ctx = _build_page_summary_ctx(fdf, r)   # your existing helper
-    summary_md = draft_page_summary(page_ctx)
-
-    # escape underscores so names like Store_2 don't italicize
-    summary_md_safe = summary_md.replace("_", r"\_")
-
-    # Card container
-    st.markdown("<div class='ai-summary-card'>", unsafe_allow_html=True)
-
-    # Header
-    st.markdown(
-        "<div class='ai-summary-header'>"
-        "  <span style='font-size:22px'>🧾</span>"
-        "  <h3 class='ai-summary-title'>Executive Snapshot</h3>"
-        "</div>",
-        unsafe_allow_html=True
+    # --- Page-level AI Summary (Overview) ---
+    page_ctx = _build_page_summary_ctx(fdf, r)      # your existing helper
+    render_ai_summary_block(
+        title="Executive AI Summary",
+        ctx=page_ctx,
+        draft_fn=draft_page_summary,
+        show_toggle=True,
+        toggle_key="overview_ai_summary"
     )
-    st.markdown("<hr class='ai-hr'/>", unsafe_allow_html=True)
-
-    # Body (your generated bullets)
-    st.markdown(summary_md_safe)
-
-    # Actions
-    st.markdown("<div class='ai-actions'>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1: st.button("📤 Notify Stakeholders", use_container_width=True)
-    with c2: st.button("📑 Export Action List", use_container_width=True)
-    with c3: st.button("🗓️ Schedule Follow-up", use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Close card
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
 
 
 
@@ -1068,160 +1572,258 @@ elif page == "Drivers & Performance":
     page_header(
         title="Drivers & Performance",
         subtitle="Understand which stores, departments, and regions are driving your success—identify opportunities for growth",
-        gradient_start="#8b5cf6",
-        gradient_end="#7c3aed"
+        gradient_start="#667eea",
+        gradient_end="#764ba2"
     )
     
     fdf = _filter_df(ss.df)
 
-    # Regional Contribution
-    section_divider("Regional Contribution", "🌍")
-    try:
-        st.plotly_chart(fig_regional_share(fdf), use_container_width=True)
-        insight_box(
-            "Compare regional performance to identify growth opportunities and optimize resource allocation across geographies.",
-            color="#8b5cf6"
-        )
-    except Exception:
-        st.info("Regional contribution unavailable for current filters.")
+    rules = load_rules()  # Load configuration rules
+    r = compute_kpis(fdf, rules, ss.get("filters"))  # Compute KPIs
 
-    # Department Drivers
-    section_divider("Department Drivers", "📦")
+
+    # ═══════════════════════════════════════════════════════════════
+    # REGIONAL PERFORMANCE
+    # ═══════════════════════════════════════════════════════════════
     
-    col1, col2 = st.columns([2, 1])
+    section_divider("Regional Performance")
+
+    # Explanation box at top
+    with st.expander("Understanding Regional Metrics", expanded=False):
+        st.markdown("""
+        - **Revenue** - Total sales for the region over the last 4 weeks
+        - **Trend** - % change compared to the previous 4 weeks (positive = growth, negative = decline)
+        - **Transactions** - Number of customer purchases
+        - **Avg/txn** - Average sale value per transaction (Revenue ÷ Transactions)
+        """)
+    
+
+    col1, col2 = st.columns([1.2, 1])
+
     with col1:
-        try:
-            st.plotly_chart(fig_dept_pareto(fdf), use_container_width=True)
-        except Exception:
-            st.info("Not enough department data to compute 80/20 analysis.")
+        # Regional Donut Chart
+        st.plotly_chart(
+            fig_regional_donut(r, height=500),
+            use_container_width=True
+        )
+
+    with col2:
+        st.markdown("""
+        <div class='section-spacer'></div>
+        <div class='section-spacer'></div>
+        <div class='section-spacer'></div>
+        """, unsafe_allow_html=True)
+        
+        regional = r.get("regional", {})
+
+        if regional:
+            # Build a tidy table
+            rows = []
+            for region, m in regional.items():
+                rows.append({
+                    "Region": region,
+                    "Revenue ($)": float(m.get("sales", 0)),
+                    "Trend (4w)": float(m.get("trend_4wk", 0)) * 100,  # % value
+                    "Transactions": int(m.get("transactions", 0) or 0),
+                    "Avg/Txn ($)": float(m.get("avg_transaction_value", 0) or 0.0),
+                })
+
+            df_reg = (
+                pd.DataFrame(rows)
+                .sort_values("Revenue ($)", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            # Color positive/negative trend (match your blue/pink palette)
+            def _trend_color(v):
+                try:
+                    return (
+                        "color: #69d3f3; font-weight:600" if v > 0 else
+                        "color: #f347ce; font-weight:600" if v < 0 else
+                        "color: #9ca3af;"
+                    )
+                except Exception:
+                    return ""
+
+            st.markdown("###### Regional Metrics")
+            st.dataframe(
+                df_reg.style
+                    .format({
+                        "Revenue ($)": "{:,.0f}",
+                        "Trend (4w)": "{:+.1f}%",
+                        "Transactions": "{:,}",
+                        "Avg/Txn ($)": "{:,.2f}",
+                    })
+                    .applymap(_trend_color, subset=["Trend (4w)"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption("💡 Trend is 4-week vs prior 4-week. Blue = growth, pink = decline.")
+        else:
+            st.info("No regional data available for the current filters.")
+
+    # AI INSIGHT: REGIONAL
+    if ss.get("ai_insights_enabled", True):
+        regional = r.get("regional", {})
+        
+        regional_ctx = {
+            "analysis_type": "regional_performance",
+            "regions_count": len(regional),
+        }
+        
+        for region, metrics in regional.items():
+            sales = metrics.get("sales", 0)
+            trend = metrics.get("trend_4wk", 0)
+            txns = metrics.get("transactions", 0)
+            atv = metrics.get("avg_transaction_value", 0)
+            
+            regional_ctx[f"{region}_sales"] = float(sales)
+            regional_ctx[f"{region}_trend_pct"] = float(trend * 100)
+            regional_ctx[f"{region}_transactions"] = int(txns)
+            regional_ctx[f"{region}_avg_transaction"] = float(atv)
+        
+        # Calculate concentration
+        if regional:
+            sales_list = [m.get("sales", 0) for m in regional.values()]
+            if sales_list:
+                regional_ctx["top_region_contribution_pct"] = float(max(sales_list) / sum(sales_list) * 100)
+                regional_ctx["regional_balance"] = float(min(sales_list) / max(sales_list) * 100)
+        
+        ai_note("Regional Performance Analysis", regional_ctx, icon="💡")
+    
+    
+    # ═══════════════════════════════════════════════════════════════
+    # DEPARTMENT DRIVERS (PARETO)
+    # ═══════════════════════════════════════════════════════════════
+    
+    section_divider("Department Drivers")
+    
+    st.markdown("**80/20 Analysis:** Which departments drive most revenue?")
+    
+    col1, col2 = st.columns([2.5, 1])
+    
+    with col1:
+        departments = r.get("departments", {})
+        if departments:
+            st.plotly_chart(
+                fig_department_pareto(departments, height=500),
+                use_container_width=True
+            )
+        else:
+            st.info("No department data available")
     
     with col2:
-        try:
-            st.plotly_chart(fig_dept_sparklines_top3(fdf, height=280), use_container_width=True)
-        except Exception:
-            st.info("Not enough weekly data to render department trends.")
-    
-    insight_box(
-        "Revenue concentration is typical—focus on expanding top performers and diagnosing declines in underperformers to maximize ROI.",
-        color="#8b5cf6"
-    )
-
-    # Store Consistency
-    section_divider("Store Consistency Matrix", "🏪")
-    try:
-        st.plotly_chart(fig_store_consistency_heatmap(fdf), use_container_width=True)
-        st.caption("💡 Identify volatile stores and weeks that may require operational attention or investigation")
-    except Exception:
-        st.info("Store consistency heatmap unavailable for current data slice.")
-
-
-# -------- DIAGNOSTICS & EFFICIENCY --------
-elif page == "Diagnostics & Efficiency":
-    _ensure_data()
-    if ss.result is None: 
-        _recompute(_filter_df(ss.df))
-
-    page_header(
-        title="Diagnostics & Efficiency",
-        subtitle="Identify data quality issues, anomalies, and opportunities for optimization—improve operational excellence",
-        gradient_start="#f59e0b",
-        gradient_end="#d97706"
-    )
-    
-    fdf = _filter_df(ss.df)
-
-    # Data Quality Section
-    section_divider("Data Quality Assessment", "✅")
-    
-    completeness = float((fdf["weekly_sales"].notna().mean()*100) if ("weekly_sales" in fdf.columns and not fdf.empty) else 100.0)
-    
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        st.markdown(f"""
-        <div class='card'>
-            <h3>Data Completeness</h3>
-            <div class='v'>{completeness:.1f}%</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with c2:
-        missing_count = fdf["weekly_sales"].isna().sum() if "weekly_sales" in fdf.columns else 0
-        st.markdown(f"""
-        <div class='card'>
-            <h3>Missing Records</h3>
-            <div class='v'>{missing_count}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with c3:
-        quality_status = "Excellent" if completeness >= 95 else "Good" if completeness >= 85 else "Needs Attention"
-        quality_color = "#22c55e" if completeness >= 95 else "#f59e0b" if completeness >= 85 else "#ef4444"
-        st.markdown(f"""
-        <div class='card'>
-            <h3>Quality Status</h3>
-            <div class='v' style='color: {quality_color};'>{quality_status}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    try:
-        st.plotly_chart(fig_store_consistency_heatmap(fdf, missing_only=True), use_container_width=True)
-    except Exception:
-        st.info("Missing data heatmap unavailable for current filters.")
-    
-    colA, colB = st.columns([1, 2])
-    with colA:
-        if st.button("📥 Export Missing Data Report", use_container_width=True):
-            st.success("✅ Report generated successfully!")
-    
-    insight_box(
-        "Fill data gaps before forecasting to improve accuracy. Missing data distorts trend analysis and growth metrics.",
-        color="#f59e0b"
-    )
-
-    # Efficiency Analysis
-    section_divider("Efficiency Analysis", "⚡")
-    
-    try:
-        fig_eff, r2 = fig_efficiency_quadrants_r2(fdf)
-        st.plotly_chart(fig_eff, use_container_width=True)
+        st.info('''
+        **Pareto Chart Explained**
         
-        st.markdown(f"""
-        <div style="
-            background: rgba(245, 158, 11, 0.1);
-            border-left: 4px solid #f59e0b;
-            padding: 16px 20px;
-            border-radius: 12px;
-            margin: 20px 0;
-        ">
-            <span style="color: #fbbf24; font-weight: 600; font-size: 1.05rem;">📊 Statistical Analysis:</span>
-            <span style="color: #cbd5e1; margin-left: 8px;">
-                Quadrants reveal efficiency vs scale patterns with R² = {r2:.2f}. 
-                Transfer best practices from high-efficiency segments (top-right quadrant) to improve underperformers.
-            </span>
-        </div>
-        """, unsafe_allow_html=True)
-    except Exception:
-        st.info("Insufficient data to compute efficiency quadrants (requires sales & transaction data).")
-
-    # Anomalies & Outliers
-    section_divider("Anomalies & Outliers", "🚨")
+         **Bars** = Department revenue
+         **Line** = Cumulative %
+        
+        **The 80/20 Rule:**
+        Typically 80% of revenue comes from 20% of departments.
+        
+        **Why it matters:**
+        - Focus on top performers
+        - Allocate resources efficiently
+        - Maximize ROI on investments
+        - Identify expansion opportunities
+        
+        **Example:** If 3 departments generate 80% of sales, focus on growing those instead of spreading resources thin.
+        ''')
     
-    try:
-        outlier_table = outlier_table_iqr(fdf)
-        if outlier_table.empty:
-            st.success("✅ No significant anomalies detected based on statistical analysis.")
-        else:
-            st.dataframe(outlier_table, use_container_width=True)
+    # AI INSIGHT: DEPARTMENTS
+    if ss.get("ai_insights_enabled", True):
+        departments = r.get("departments", {})
+        dept_meta = r.get("departments_meta", {})
+        
+        dept_ctx = {
+            "analysis_type": "department_concentration",
+            "total_departments": dept_meta.get("total_count", len(departments)),
+            "pareto_80_count": dept_meta.get("pareto_80_count", 0),
+        }
+        
+        if departments:
+            # Sort by sales
+            sorted_depts = sorted(
+                departments.items(),
+                key=lambda x: x[1].get("sales", 0),
+                reverse=True
+            )
             
-            col1, col2, col3 = st.columns([1, 1, 2])
-            with col1:
-                if st.button("🔎 Investigate Selected", use_container_width=True):
-                    st.info("🔍 Opening detailed anomaly investigation...")
-            with col2:
-                if st.button("📊 Export Report", use_container_width=True):
-                    st.success("✅ Anomaly report exported!")
-    except Exception:
-        st.info("Unable to compute outliers for current filter selection.")
+            total_sales = sum(d[1].get("sales", 0) for d in sorted_depts)
+            
+            if total_sales > 0:
+                dept_ctx["concentration_level"] = (
+                    "high" if dept_ctx["pareto_80_count"] <= 3 
+                    else "moderate" if dept_ctx["pareto_80_count"] <= 5 
+                    else "balanced"
+                )
+                
+                dept_ctx["top_80_pct_of_departments"] = float(
+                    dept_ctx["pareto_80_count"] / dept_ctx["total_departments"] * 100
+                )
+                
+                # Top 3 departments details
+                for i, (dept, metrics) in enumerate(sorted_depts[:3]):
+                    dept_ctx[f"top_{i+1}_department"] = dept
+                    dept_ctx[f"top_{i+1}_sales"] = float(metrics.get("sales", 0))
+                    dept_ctx[f"top_{i+1}_contribution_pct"] = float(metrics.get("sales", 0) / total_sales * 100)
+                    dept_ctx[f"top_{i+1}_trend_pct"] = float(metrics.get("trend_4wk", 0) * 100)
+        
+        ai_note("Department 80/20 Analysis", dept_ctx, icon="💡")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # EXECUTIVE AI SUMMARY – Drivers & Performance
+    # ═══════════════════════════════════════════════════════════════
+    if ss.get("ai_insights_enabled", True):
+        perf_ctx = {}
+
+        # Regions
+        regional = r.get("regional", {})
+        trn, trv, brn, brv = _top_bottom_from_any(regional, fdf, level="region")
+        if trn or brn:
+            perf_ctx.update({
+                "top_region_name": trn, "top_region_sales": float(trv),
+                "bottom_region_name": brn, "bottom_region_sales": float(brv),
+            })
+
+        # Departments
+        departments = r.get("departments", {})
+        tdn, tdv, bdn, bdv = _top_bottom_from_any(departments, fdf, level="department")
+        if tdn or bdn:
+            perf_ctx.update({
+                "top_dept_name": tdn, "top_dept_sales": float(tdv),
+                "bottom_dept_name": bdn, "bottom_dept_sales": float(bdv),
+            })
+
+        # Stores
+        stores = r.get("stores", {})
+        if stores:
+            perf_ctx.update({
+                "top_store_name": stores.get("top_store", "Unknown"),
+                "top_store_sales": float(stores.get("top_store_sales", 0)),
+                "bottom_store_name": stores.get("bottom_store", "Unknown"),
+                "bottom_store_sales": float(stores.get("bottom_store_sales", 0)),
+            })
+
+        # Department concentration (optional 80/20 color)
+        dept_vals = []
+        if isinstance(departments, dict) and departments:
+            dept_vals = [_val_sales(v) for v in departments.values()]
+        elif "department" in fdf.columns:
+            dept_vals = fdf.groupby("department")["weekly_sales"].sum().tolist()
+        dept_vals = [v for v in dept_vals if v > 0]
+        if dept_vals:
+            perf_ctx["dept_concentration_pct"] = max(dept_vals) / sum(dept_vals) * 100.0
+
+        # Re-use the same renderer used on Overview (no toggle here)
+        render_ai_summary_block(
+            title="Executive AI Summary",
+            ctx=perf_ctx,
+            draft_fn=draft_drivers_summary, 
+            show_toggle=False,
+            toggle_key="drivers_ai_summary"
+        )
 
 
 # -------- AI INSIGHTS & RECOMMENDATIONS --------
@@ -1237,16 +1839,16 @@ elif page == "AI Insights & Recommendations":
         gradient_end="#db2777"
     )
     
-    if ss.insights is None:
-        with st.spinner("🤖 AI is analyzing your data and generating insights..."):
-            chart_descs = [
-                {"title": "Sales Trend & Forecast"},
-                {"title": "Regional Performance"},
-                {"title": "Store Efficiency Quadrants"},
-                {"title": "Department 80/20 Analysis"}
-            ]
-            ss.insights = draft_insights(ss.result, chart_descs)
-            time.sleep(0.5)
+    # if ss.insights is None:
+    #     with st.spinner("🤖 AI is analyzing your data and generating insights..."):
+    #         chart_descs = [
+    #             {"title": "Sales Trend & Forecast"},
+    #             {"title": "Regional Performance"},
+    #             {"title": "Store Efficiency Quadrants"},
+    #             {"title": "Department 80/20 Analysis"}
+    #         ]
+    #         ss.insights = draft_insights(ss.result, chart_descs)
+    #         time.sleep(0.5)
 
     # AI-Generated Insights
     section_divider("AI-Generated Insights", "🎯")

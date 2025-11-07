@@ -1,3 +1,5 @@
+# rules.yaml - Data Pipeline Configuration
+
 dataset:
   required_columns: [date, store, department, region, weekly_sales, transactions]
   dtypes:
@@ -8,42 +10,123 @@ dataset:
     weekly_sales: float
     transactions: int
   optional_columns: [units_sold, discount_applied, cost_of_goods_sold, product_category, customer_segment]
+  
+  # Date validation
+  date_validation:
+    min_date: "2020-01-01"           # Reject data before this
+    max_date: null                   # null = accept up to today
+    future_days_allowed: 0           # Don't allow future dates
 
 cleaning:
   trim_strings: true
   drop_duplicates: true
+  
+  # Critical: Missing sales should DROP rows, not impute!
   null_policy:
-    weekly_sales: impute_median       # [drop_row | zero | impute_median]
-    transactions: impute_median
+    weekly_sales: drop_row           # CHANGED: Don't guess revenue!
+    transactions: impute_median      # Can estimate transaction count
+    date: drop_row                   # ADDED: Dates are critical
+    store: drop_row                  # ADDED: Must know the store
+    department: fill_unknown         # ADDED: Can mark as "Unknown"
+    region: fill_unknown             # ADDED: Can mark as "Unknown"
+  
   clip_ranges:
-    weekly_sales: [0, null]           # min, max (null = no cap)
-    transactions: [0, null]
+    weekly_sales: [0, 1000000]       # CHANGED: Added max cap (adjust to your scale)
+    transactions: [0, 10000]         # CHANGED: Added reasonable max
+  
+  # NEW: Business validation rules
+  validation:
+    min_transactions_per_sale: 1     # Sales should have at least 1 transaction
+    max_avg_transaction: 50000       # Flag if avg transaction > $50K (likely error)
+    min_stores: 2                    # Need at least 2 stores for comparison
+    min_weeks: 4                     # Need at least 4 weeks for trends
 
 outliers:
-  method: iqr                         # [iqr | zscore | mad] (currently only iqr used)
-  group_by: store                     # detect per store (string)
-  k: 1.5                              # IQR multiplier
-  treat: flag                         # [flag | winsorize | remove] (we flag only)
+  method: iqr                        # [iqr | zscore | mad]
+  group_by: store                    # Detect per store
+  k: 1.5                             # IQR multiplier
+  treat: flag                        # [flag | winsorize | remove]
+  report_threshold: 3                # Report if more than 3 outliers per store
 
 kpis:
-  time_freq: W                        # weekly
+  time_freq: W                       # Weekly aggregation
   aggregates:
-    weekly_sales: [sum, mean]
-    transactions: [sum]
+    weekly_sales: [sum, mean, std]   # ADDED: std for volatility
+    transactions: [sum, mean]        # ADDED: mean for avg per week
+  
   derived:
-    avg_order_value: "weekly_sales_sum / NULLIF(transactions_sum,0)"
+    avg_order_value: "weekly_sales_sum / NULLIF(transactions_sum, 0)"
+    sales_volatility: "weekly_sales_std / NULLIF(weekly_sales_mean, 0)"  # NEW
+  
+  # NEW: Business thresholds
+  thresholds:
+    growth:
+      strong: 0.05                   # 5%+ is strong growth
+      stable: 0.0                    # 0-5% is stable
+      declining: -0.05               # <-5% is concerning
+    health:
+      excellent: 0.10                # 10%+ growth
+      good: 0.03                     # 3-10% growth
+      watch: -0.03                   # -3% to 3%
+      at_risk: -0.10                 # -10% to -3%
+      critical: -999                 # < -10%
+    stores:
+      min_sales_per_week: 5000       # Flag stores below this
+      min_transactions_per_week: 50  # Flag stores below this
 
-plots:                                # optional; not required by pipeline
+# NEW: Alert rules
+alerts:
+  enabled: true
+  rules:
+    - name: "Revenue Drop Alert"
+      condition: "wow_pct < -0.15"   # 15% week-over-week drop
+      severity: high
+      message: "Revenue dropped {wow_pct:.1%} WoW - investigate immediately"
+    
+    - name: "Store Performance Alert"
+      condition: "store_4wk_decline > 3"  # 3+ stores declining
+      severity: medium
+      message: "{store_4wk_decline} stores declining - review operations"
+    
+    - name: "Data Quality Alert"
+      condition: "missing_pct > 0.10"  # >10% missing data
+      severity: high
+      message: "Data quality issue: {missing_pct:.1%} of records incomplete"
+
+# NEW: Report generation
+reports:
+  executive_summary:
+    enabled: true
+    sections: [momentum, store_pulse, benchmarks, actions]
+  
+  store_performance:
+    enabled: true
+    include_all_stores: true
+    show_trends: true
+  
+  department_analysis:
+    enabled: true
+    top_n: 10
+    show_pareto: true
+
+plots:
+  # Chart configurations with styling
   - id: trend_sales
     kind: line
     x: date
     y: weekly_sales_sum
     title: "Weekly Sales Trend"
+    colors: ["#3b82f6", "#f59e0b"]
+    show_ma: true
+    ma_periods: 4
+  
   - id: sales_by_region
     kind: bar
     x: region
     y: weekly_sales_sum
     title: "Sales by Region"
+    color_scheme: "above_below_avg"
+  
   - id: top_departments
     kind: bar
     x: department
@@ -51,3 +134,17 @@ plots:                                # optional; not required by pipeline
     sort: desc
     top_n: 10
     title: "Top 10 Departments by Sales"
+  
+  - id: store_benchmark
+    kind: benchmark_bar
+    x: store
+    y: weekly_sales_sum
+    show_avg_line: true
+    color_scheme: "above_below_avg"
+  
+  - id: wow_growth
+    kind: bar
+    x: date
+    y: wow_pct
+    title: "Week-over-Week Growth"
+    colors: ["positive: #22c55e", "negative: #ef4444"]
