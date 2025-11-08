@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import time
+import base64
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
 
@@ -301,6 +302,12 @@ ss.setdefault("insights", None)
 ss.setdefault("filters", {"store":"All", "department":"All", "region":"All"})
 ss.setdefault("page_summary_cache", {})
 rules = load_rules()
+st.set_page_config(
+    page_title="Data-to-Insight Agent",
+    page_icon="images/agent_icon.png",
+    layout="wide"
+)
+
 
 # ---------- REUSABLE HEADER COMPONENT ----------
 def page_header(title: str, subtitle: str, gradient_start: str = "#667eea", gradient_end: str = "#764ba2"):
@@ -1022,10 +1029,54 @@ def _ai_card(title: str, body_md: str):
 
 # ---------- SIDEBAR NAVIGATION ----------
 with st.sidebar:
+    # Load icon safely
+    def get_base64_image(image_path):
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+        except FileNotFoundError:
+            st.warning(f"⚠️ Icon file not found: {image_path}")
+            return None
+
+    icon_base64 = get_base64_image("images/agent_icon.png")
+
+    # Sidebar Header
+    if icon_base64:
+        st.markdown(
+            f"""
+            <div style="
+                display:flex;
+                justify-content:center;
+                align-items:center;
+                margin-bottom:10px;
+                margin-top:4px;
+            ">
+                <img src="data:image/png;base64,{icon_base64}" width="80">
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            """
+            <div style="
+                display:flex;
+                justify-content:center;
+                align-items:center;
+                margin-bottom:10px;
+                margin-top:4px;
+                font-size:42px;
+            ">
+                📊
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     st.markdown("""
     <div style="text-align: center; padding: 20px 0 10px 0;">
         <h1 style="color: #f8fafc; margin: 0; font-size: 1.6rem; font-weight: 800;">
-            AI Data Analyst
+            AI Data-to-Insights Agent
         </h1>
         <p style="color: #64748b; margin: 4px 0 0 0; font-size: 0.85rem;">
             Sales Intelligence Platform

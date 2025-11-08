@@ -681,8 +681,6 @@ def table_store_4wk_change(df: pd.DataFrame) -> pd.DataFrame:
     return t
 
 
-
-
 # Add to plots.py
 
 def fig_regional_growth_comparison(df: pd.DataFrame, height: int = 360) -> go.Figure:
