@@ -229,7 +229,7 @@ Generate an executive summary following this EXACT format:
 Requirements:
 - Use exact numbers from the data
 - Name specific stores/departments from context
-- Keep bullets 15-20 words maximum
+- Keep bullets 25-30 words maximum
 - Include percentage targets in actions
 - Be actionable, not descriptive
 """
@@ -414,7 +414,7 @@ Generate a drivers analysis following this format:
 Requirements:
 - Use exact numbers from the data
 - Name specific stores/departments from context
-- Keep bullets 15-20 words maximum
+- Keep bullets 25-30 words maximum
 - Include percentage targets in actions
 - Be actionable, not descriptive
 """
