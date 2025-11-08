@@ -1,6 +1,7 @@
 # narrative.py - REFINED VERSION
 import os, json
 import numpy as np
+import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -164,6 +165,7 @@ def _fallback_page_summary(ctx: dict) -> str:
     last_wow = gp.get("last_wow_pct")
     
     lines.append("**Momentum**")
+    lines.append("")
     if trend_4w is not None:
         if abs(trend_4w) > 5:
             direction = "Accelerating" if trend_4w > 0 else "Slowing"
@@ -182,6 +184,12 @@ def _fallback_page_summary(ctx: dict) -> str:
     # 2) Store Pulse - Winners and losers
     lines.append("")
     lines.append("**Store Pulse**")
+    
+    # Initialize variables to avoid scope issues
+    best = None
+    best_pct = 0
+    worst = None
+    worst_pct = 0
     
     if sp:
         g = sp.get("stores_growing", 0)
@@ -510,3 +518,649 @@ OUTPUT (markdown only):
             
     except Exception as e:
         return _fallback_drivers_summary(ctx)
+# ========= ENHANCED AI INSIGHT GENERATORS =========
+
+def _generate_store_insights(ctx: dict, df, result: dict) -> str:
+    """Generate detailed store performance insights"""
+    client = _safe_client()
+    
+    # Extract store data
+    stores_data = result.get("stores", {})
+    store_pulse = ctx.get("store_pulse", {})
+    
+    if not client:
+        return _fallback_store_insights(store_pulse, stores_data)
+    
+    try:
+        prompt = f"""
+Analyze store performance data for strategic insights.
+
+STORE DATA:
+{json.dumps({
+    "store_pulse": store_pulse,
+    "stores_summary": stores_data,
+    "total_stores": df['store'].nunique() if hasattr(df, 'columns') and 'store' in df.columns else 0
+}, indent=2)}
+
+Provide 3-4 bullet points covering:
+1. Top performer analysis (what they're doing right)
+2. Underperformer diagnosis (specific issues)
+3. Performance spread (concentration risk)
+4. Immediate action required
+
+Format: markdown bullets, be specific with store names and numbers.
+"""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a retail operations analyst. Focus on actionable store insights."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        
+        return resp.choices[0].message.content.strip()
+        
+    except Exception:
+        return _fallback_store_insights(store_pulse, stores_data)
+
+def _fallback_store_insights(store_pulse: dict, stores_data: dict) -> str:
+    """Fallback store insights without AI"""
+    insights = []
+    
+    if store_pulse:
+        best = store_pulse.get("best_store")
+        best_pct = store_pulse.get("best_growth_pct", 0)
+        worst = store_pulse.get("worst_store") 
+        worst_pct = store_pulse.get("worst_decline_pct", 0)
+        growing = store_pulse.get("stores_growing", 0)
+        declining = store_pulse.get("stores_declining", 0)
+        
+        if best and best_pct > 5:
+            insights.append(f"• **{best}** leads with +{best_pct:.1f}% growth - Document their operational playbook")
+            
+        if worst and worst_pct < -5:
+            insights.append(f"• **{worst}** declining {worst_pct:.1f}% - Requires immediate intervention this week")
+            
+        if growing and declining:
+            total = growing + declining
+            if declining > growing:
+                insights.append(f"• **Performance Alert**: {declining}/{total} stores declining - Systematic issue analysis needed")
+            else:
+                insights.append(f"• **Balanced Performance**: {growing}/{total} stores growing - Scale winning practices")
+    
+    if stores_data:
+        top_sales = stores_data.get("top_store_sales", 0)
+        bottom_sales = stores_data.get("bottom_store_sales", 0)
+        if top_sales and bottom_sales:
+            gap = (top_sales - bottom_sales) / top_sales * 100
+            insights.append(f"• **Performance Gap**: {gap:.0f}% between top and bottom performers - Address capacity constraints")
+    
+    if not insights:
+        insights = ["• Store performance analysis - Enable individual store tracking for detailed insights"]
+    
+    return "\n".join(insights)
+
+def _generate_risk_assessment(ctx: dict, df, result: dict) -> str:
+    """Generate revenue risk assessment"""
+    client = _safe_client()
+    
+    # Extract risk factors
+    momentum = ctx.get("momentum", {})
+    growth_pulse = ctx.get("growth_pulse", {})
+    departments = result.get("departments", {})
+    
+    if not client:
+        return _fallback_risk_assessment(momentum, growth_pulse, departments)
+    
+    try:
+        prompt = f"""
+Assess revenue risks based on performance data.
+
+RISK FACTORS:
+{json.dumps({
+    "momentum": momentum,
+    "growth_pulse": growth_pulse,
+    "department_concentration": _calculate_concentration(departments) if departments else 0
+}, indent=2)}
+
+Identify 3-4 risk factors:
+1. Momentum/trend risks
+2. Volatility/stability concerns  
+3. Concentration risks
+4. External vulnerability
+
+Rate each risk as HIGH/MEDIUM/LOW and suggest mitigation.
+Format: markdown bullets with risk levels.
+"""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a financial risk analyst for retail operations."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        
+        return resp.choices[0].message.content.strip()
+        
+    except Exception:
+        return _fallback_risk_assessment(momentum, growth_pulse, departments)
+
+def _fallback_risk_assessment(momentum: dict, growth_pulse: dict, departments: dict) -> str:
+    """Fallback risk assessment without AI"""
+    risks = []
+    
+    # Momentum risk
+    current = momentum.get("current_sales", 0)
+    ma4 = momentum.get("ma4", 0)
+    if ma4 and current:
+        trend = (current - ma4) / ma4 * 100
+        if trend < -10:
+            risks.append("• **HIGH RISK**: Revenue momentum declining >10% - Immediate action required")
+        elif trend < -5:
+            risks.append("• **MEDIUM RISK**: Revenue softening - Monitor weekly and prepare contingencies")
+    
+    # Volatility risk
+    last_wow = growth_pulse.get("last_wow_pct", 0)
+    if abs(last_wow) > 15:
+        risks.append("• **HIGH RISK**: High volatility (±15% WoW) - Stabilize operations and demand planning")
+    
+    # Concentration risk
+    if departments:
+        concentration = _calculate_concentration(departments)
+        if concentration > 40:
+            risks.append(f"• **MEDIUM RISK**: Revenue concentration {concentration:.0f}% in top department - Diversify portfolio")
+    
+    # Default
+    if not risks:
+        risks.append("• **LOW RISK**: Performance appears stable - Continue monitoring key metrics")
+    
+    return "\n".join(risks)
+
+def _generate_growth_opportunities(ctx: dict, df, result: dict) -> str:
+    """Generate growth opportunity insights"""
+    client = _safe_client()
+    
+    # Extract opportunity data
+    benchmarks = ctx.get("benchmarks", {})
+    regional = result.get("regional", {})
+    departments = result.get("departments", {})
+    
+    if not client:
+        return _fallback_growth_opportunities(benchmarks, regional, departments)
+    
+    try:
+        prompt = f"""
+Identify growth opportunities from performance gaps and benchmarks.
+
+OPPORTUNITY DATA:
+{json.dumps({
+    "benchmarks": benchmarks,
+    "regional_performance": regional,
+    "department_performance": departments
+}, indent=2, default=str)}
+
+Find 3-4 opportunities:
+1. Underperforming units with high potential
+2. Successful practices to scale
+3. Market expansion possibilities
+4. Product/category opportunities
+
+Quantify potential impact where possible.
+Format: markdown bullets with opportunity sizing.
+"""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a growth strategy consultant for retail."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        
+        return resp.choices[0].message.content.strip()
+        
+    except Exception:
+        return _fallback_growth_opportunities(benchmarks, regional, departments)
+
+def _fallback_growth_opportunities(benchmarks: dict, regional: dict, departments: dict) -> str:
+    """Fallback growth opportunities without AI"""
+    opportunities = []
+    
+    # Store opportunities
+    store_bench = benchmarks.get("store", {})
+    if store_bench:
+        below_avg = store_bench.get("below_avg_count", 0)
+        gap_pct = store_bench.get("bottom_gap_pct", 0)
+        if below_avg > 0 and gap_pct > 20:
+            opportunities.append(f"• **Store Uplift**: {below_avg} stores below average - {gap_pct:.0f}% gap represents significant opportunity")
+    
+    # Regional expansion
+    if regional:
+        region_sales = {k: v.get("sales", 0) for k, v in regional.items()}
+        if region_sales:
+            top_region = max(region_sales, key=region_sales.get)
+            bottom_region = min(region_sales, key=region_sales.get)
+            gap = region_sales[top_region] - region_sales[bottom_region]
+            opportunities.append(f"• **Regional Growth**: {bottom_region} trails {top_region} by ${gap:,.0f} - Scale best practices")
+    
+    # Department opportunities  
+    if departments:
+        dept_sales = {k: v.get("sales", 0) for k, v in departments.items()}
+        if dept_sales:
+            total_sales = sum(dept_sales.values())
+            top_dept = max(dept_sales, key=dept_sales.get)
+            opportunities.append(f"• **Category Expansion**: {top_dept} success model - Apply to underperforming categories")
+    
+    if not opportunities:
+        opportunities.append("• **Market Analysis**: Conduct deeper analysis to identify growth opportunities")
+    
+    return "\n".join(opportunities)
+
+def _generate_efficiency_insights(ctx: dict, df, result: dict) -> str:
+    """Generate operational efficiency insights"""
+    client = _safe_client()
+    
+    # Calculate efficiency metrics
+    efficiency_data = _calculate_efficiency_metrics(df, result)
+    
+    if not client:
+        return _fallback_efficiency_insights(efficiency_data)
+    
+    try:
+        prompt = f"""
+Analyze operational efficiency metrics for improvement opportunities.
+
+EFFICIENCY DATA:
+{json.dumps(efficiency_data, indent=2)}
+
+Provide 3-4 efficiency insights:
+1. Transaction efficiency (ATV, conversion)
+2. Resource utilization gaps
+3. Process optimization opportunities  
+4. Cost reduction potential
+
+Focus on actionable improvements with ROI estimates.
+Format: markdown bullets with efficiency gains.
+"""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an operations efficiency consultant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        
+        return resp.choices[0].message.content.strip()
+        
+    except Exception:
+        return _fallback_efficiency_insights(efficiency_data)
+
+def _fallback_efficiency_insights(efficiency_data: dict) -> str:
+    """Fallback efficiency insights without AI"""
+    insights = []
+    
+    avg_transaction = efficiency_data.get("avg_transaction_value", 0)
+    if avg_transaction:
+        insights.append(f"• **Transaction Optimization**: Avg transaction ${avg_transaction:.0f} - Test upselling strategies")
+    
+    stores_count = efficiency_data.get("active_stores", 0)
+    if stores_count:
+        sales_per_store = efficiency_data.get("sales_per_store", 0)
+        insights.append(f"• **Store Productivity**: ${sales_per_store:,.0f} per store - Benchmark against top quartile")
+    
+    utilization = efficiency_data.get("capacity_utilization", 0)
+    if utilization and utilization < 80:
+        insights.append(f"• **Capacity Gap**: {utilization:.0f}% utilization - Opportunity for volume growth")
+    
+    if not insights:
+        insights.append("• **Efficiency Review**: Implement detailed operational metrics tracking")
+    
+    return "\n".join(insights)
+
+def _generate_strategic_actions(ctx: dict, df, result: dict) -> str:
+    """Generate comprehensive strategic recommendations with 5 bullets per priority level"""
+    client = _safe_client()
+    
+    if not client:
+        return _fallback_strategic_actions(ctx, result)
+    
+    try:
+        # Extract comprehensive context for detailed recommendations
+        prompt = f"""
+Create strategic recommendations with exactly 5 detailed actions per priority level.
+
+COMPLETE CONTEXT:
+{json.dumps(ctx, indent=2, default=str)}
+
+Generate strategic actions organized by priority level:
+
+**IMMEDIATE ACTIONS (Next 7 Days)**
+1. **[Entity]**: Specific action with timeline and expected impact (15-20 words max)
+2. **[Entity]**: Specific action with timeline and expected impact (15-20 words max)
+3. **[Entity]**: Specific action with timeline and expected impact (15-20 words max)
+4. **[Entity]**: Specific action with timeline and expected impact (15-20 words max)
+5. **[Entity]**: Specific action with timeline and expected impact (15-20 words max)
+
+**HIGH PRIORITY (Next 30 Days)**
+1. **[Entity]**: Strategic initiative with implementation steps (15-20 words max)
+2. **[Entity]**: Strategic initiative with implementation steps (15-20 words max)
+3. **[Entity]**: Strategic initiative with implementation steps (15-20 words max)
+4. **[Entity]**: Strategic initiative with implementation steps (15-20 words max)
+5. **[Entity]**: Strategic initiative with implementation steps (15-20 words max)
+
+**MEDIUM PRIORITY (Next 90 Days)**
+1. **[Entity]**: Long-term strategic initiative with ROI focus (15-20 words max)
+2. **[Entity]**: Long-term strategic initiative with ROI focus (15-20 words max)
+3. **[Entity]**: Long-term strategic initiative with ROI focus (15-20 words max)
+4. **[Entity]**: Long-term strategic initiative with ROI focus (15-20 words max)
+5. **[Entity]**: Long-term strategic initiative with ROI focus (15-20 words max)
+
+Requirements:
+- Reference specific entities from the data (stores, departments, regions)
+- Include quantified targets (percentages, dollar amounts)
+- Keep each bullet to 15-20 words maximum
+- Focus on actionable steps with clear outcomes
+- Use actual data from context for concrete recommendations
+"""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a senior retail strategy consultant. Create concise, actionable strategic recommendations with exactly 5 bullets per priority level."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=400
+        )
+        
+        return resp.choices[0].message.content.strip()
+        
+    except Exception:
+        return _fallback_strategic_actions(ctx, result)
+
+def _fallback_strategic_actions(ctx: dict, result: dict) -> str:
+    """Fallback strategic actions with exactly 5 bullets per priority level"""
+    actions = []
+    
+    # Get key entities and metrics from context
+    drivers = ctx.get("drivers", {})
+    growth_pulse = ctx.get("growth_pulse", {})
+    momentum = ctx.get("momentum", {})
+    store_pulse = ctx.get("store_pulse", {})
+    
+    last_wow = growth_pulse.get("last_wow_pct", 0)
+    top_region = drivers.get("regional", {}).get("top")
+    bottom_region = drivers.get("regional", {}).get("bottom")
+    top_dept = drivers.get("departments", {}).get("top")
+    bottom_dept = drivers.get("departments", {}).get("bottom")
+    worst_store = store_pulse.get("worst_store")
+    best_store = store_pulse.get("best_store")
+    declining = store_pulse.get("stores_declining", 0)
+    
+    # IMMEDIATE ACTIONS (7 Days)
+    actions.append("**IMMEDIATE ACTIONS (Next 7 Days)**")
+    
+    if last_wow < -10:
+        actions.append("1. **Crisis Response**: Form emergency task force to investigate revenue decline and implement recovery measures.")
+    elif worst_store:
+        actions.append(f"1. **{worst_store}**: Deploy management team for immediate intervention and promotional campaign launch.")
+    else:
+        actions.append("1. **Performance Alert**: Identify bottom quartile locations and implement targeted promotional campaigns.")
+    
+    if declining > 2:
+        actions.append(f"2. **Multi-Store Recovery**: Launch coordinated intervention across {declining} declining locations with standardized approach.")
+    elif bottom_region:
+        actions.append(f"2. **{bottom_region}**: Deploy regional marketing blitz with enhanced promotional partnerships and customer engagement.")
+    else:
+        actions.append("2. **Market Push**: Implement proactive marketing campaigns in underperforming segments.")
+    
+    if bottom_dept:
+        actions.append(f"3. **{bottom_dept}**: Conduct emergency inventory review and implement pricing optimization strategies.")
+    else:
+        actions.append("3. **Category Focus**: Review underperforming categories and implement placement optimization initiatives.")
+    
+    actions.append("4. **Staff Training**: Deploy immediate training sessions on sales techniques and customer engagement best practices.")
+    actions.append("5. **Daily Monitoring**: Establish enhanced daily performance tracking and rapid response protocols.")
+    
+    # HIGH PRIORITY (30 Days)
+    actions.append("")
+    actions.append("**HIGH PRIORITY (Next 30 Days)**")
+    
+    if best_store:
+        actions.append(f"1. **{best_store} Playbook**: Document success strategies and create implementation guide for network rollout.")
+    else:
+        actions.append("1. **Best Practices**: Identify top performers and systematize their operational excellence strategies.")
+    
+    if top_region and bottom_region:
+        actions.append(f"2. **Regional Alignment**: Transfer {top_region} strategies to {bottom_region} with quarterly performance targets.")
+    else:
+        actions.append("2. **Market Optimization**: Implement data-driven market strategies across all regions.")
+    
+    actions.append("3. **Technology Upgrade**: Deploy advanced POS analytics and real-time performance monitoring systems.")
+    actions.append("4. **Inventory Optimization**: Implement demand forecasting and automated replenishment across all locations.")
+    actions.append("5. **Customer Experience**: Launch comprehensive customer satisfaction improvement program with loyalty initiatives.")
+    
+    # MEDIUM PRIORITY (90 Days)
+    actions.append("")
+    actions.append("**MEDIUM PRIORITY (Next 90 Days)**")
+    
+    actions.append("1. **Analytics Platform**: Implement predictive analytics and AI-driven demand forecasting system.")
+    actions.append("2. **Market Expansion**: Evaluate new market opportunities and develop strategic expansion roadmap.")
+    actions.append("3. **Product Innovation**: Launch new product categories based on market analysis and customer insights.")
+    actions.append("4. **Operational Excellence**: Establish lean operations framework and continuous improvement processes.")
+    actions.append("5. **Strategic Partnerships**: Develop key vendor relationships and explore joint venture opportunities.")
+    
+    return "\n".join(actions)
+
+# Helper functions
+def _calculate_concentration(departments: dict) -> float:
+    """Calculate revenue concentration in top department"""
+    if not departments:
+        return 0
+    
+    sales_values = [d.get("sales", 0) for d in departments.values()]
+    if not sales_values:
+        return 0
+        
+    total_sales = sum(sales_values)
+    max_sales = max(sales_values)
+    
+    return (max_sales / total_sales * 100) if total_sales > 0 else 0
+
+def _calculate_efficiency_metrics(df, result: dict) -> dict:
+    """Calculate operational efficiency metrics"""
+    metrics = {}
+    
+    if hasattr(df, 'columns') and not df.empty:
+        # Basic metrics
+        if 'weekly_sales' in df.columns:
+            metrics["total_sales"] = df['weekly_sales'].sum()
+            metrics["avg_transaction_value"] = df['weekly_sales'].mean()
+        
+        if 'store' in df.columns:
+            metrics["active_stores"] = df['store'].nunique()
+            if metrics.get("total_sales"):
+                metrics["sales_per_store"] = metrics["total_sales"] / metrics["active_stores"]
+        
+        # Capacity utilization (simplified)
+        if 'transactions' in df.columns:
+            total_transactions = df['transactions'].sum() if 'transactions' in df.columns else df.shape[0]
+            max_possible = df.shape[0] * 100  # Simplified assumption
+            metrics["capacity_utilization"] = (total_transactions / max_possible * 100) if max_possible else 0
+    
+    return metrics
+
+def _build_enhanced_ai_context(df, result: dict) -> dict:
+    """Build enhanced context for AI insights with additional metrics"""
+    # Import pandas here to avoid circular imports
+    import pandas as pd
+    
+    # Start with base context - we'll use the existing function from app.py
+    # For now, create a simplified context
+    ctx = {}
+    
+    # Build basic momentum context if we have weekly data
+    if hasattr(df, 'columns') and 'weekly_sales' in df.columns:
+        kpis_weekly = result.get("kpis_weekly", {})
+        if kpis_weekly:
+            w = pd.DataFrame(kpis_weekly)
+            if not w.empty and "date" in w and "weekly_sales_sum" in w:
+                w["date"] = pd.to_datetime(w["date"], errors="coerce")
+                w = w.dropna(subset=["date"]).sort_values("date")
+                y = w["weekly_sales_sum"]
+                ma4 = y.rolling(4, min_periods=1).mean()
+                wow = y.pct_change() * 100
+                ctx["momentum"] = {
+                    "current_sales": float(y.iloc[-1]) if len(y) > 0 else None,
+                    "ma4": float(ma4.iloc[-1]) if len(ma4) > 0 else None,
+                }
+                ctx["growth_pulse"] = {
+                    "last_wow_pct": float(wow.iloc[-1]) if len(wow) > 0 else 0.0,
+                }
+    
+    # Add enhanced metrics
+    ctx["efficiency_metrics"] = _calculate_efficiency_metrics(df, result)
+    
+    # Add data quality indicators
+    if hasattr(df, 'columns') and not df.empty:
+        ctx["data_quality"] = {
+            "completeness": (df.notna().sum().sum() / (df.shape[0] * df.shape[1]) * 100),
+            "date_range_days": (df['date'].max() - df['date'].min()).days if 'date' in df.columns else 0,
+            "record_count": len(df)
+        }
+    else:
+        ctx["data_quality"] = {"completeness": 0, "date_range_days": 0, "record_count": 0}
+    
+    # Add driver context
+    regional = result.get("regional", {})
+    departments = result.get("departments", {})
+    
+    ctx["drivers"] = {
+        "regional": {
+            "regions": list(regional.keys()) if regional else [],
+            "sales": {k: regional[k].get("sales", 0) for k in regional} if regional else {},
+            "top": max(regional, key=lambda k: regional[k].get("sales", 0)) if regional else None,
+            "bottom": min(regional, key=lambda k: regional[k].get("sales", 0)) if regional else None,
+        },
+        "departments": {
+            "sales": {k: departments[k].get("sales", 0) for k in departments} if departments else {},
+            "top": max(departments, key=lambda k: departments[k].get("sales", 0)) if departments else None,
+            "bottom": min(departments, key=lambda k: departments[k].get("sales", 0)) if departments else None,
+        }
+    }
+    
+    return ctx
+
+def _generate_strategic_actions_concise(ctx: dict, df, result: dict) -> str:
+    """Generate concise strategic actions matching the formatting style of existing summaries"""
+    client = _safe_client()
+    
+    if not client:
+        return _fallback_strategic_actions_concise(ctx, result)
+    
+    try:
+        # Extract key data points for accurate recommendations
+        momentum = ctx.get("momentum", {})
+        growth_pulse = ctx.get("growth_pulse", {})
+        drivers = ctx.get("drivers", {})
+        benchmarks = ctx.get("benchmarks", {})
+        
+        prompt = f"""
+Create strategic actions matching this exact format style:
+
+**Next 7 Days — Do This**
+1. **Entity**: Action with specific metric target.
+2. **Entity**: Action with specific metric target.
+3. **Entity**: Action with specific metric target.
+
+CONTEXT DATA:
+{json.dumps({
+    "momentum": momentum,
+    "growth_pulse": growth_pulse,
+    "top_region": drivers.get("regional", {}).get("top"),
+    "bottom_region": drivers.get("regional", {}).get("bottom"),
+    "top_dept": drivers.get("departments", {}).get("top"),
+    "bottom_dept": drivers.get("departments", {}).get("bottom"),
+    "benchmarks": benchmarks
+}, indent=2)}
+
+Requirements:
+- Use exact format: "**Entity**: Action with percentage target."
+- Reference actual entities from the data (stores, departments, regions)
+- Include specific percentage targets (10%, 15%, 20%)
+- Keep each action to 8-12 words maximum
+- Focus on immediate tactical actions
+
+OUTPUT (markdown only):
+"""
+        
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a retail strategist creating tactical action plans. Match the exact format provided."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=200
+        )
+        
+        return resp.choices[0].message.content.strip()
+        
+    except Exception:
+        return _fallback_strategic_actions_concise(ctx, result)
+
+def _fallback_strategic_actions_concise(ctx: dict, result: dict) -> str:
+    """Fallback strategic actions matching existing format style"""
+    actions = []
+    
+    # Get key entities from context
+    drivers = ctx.get("drivers", {})
+    growth_pulse = ctx.get("growth_pulse", {})
+    last_wow = growth_pulse.get("last_wow_pct", 0)
+    
+    top_region = drivers.get("regional", {}).get("top")
+    bottom_region = drivers.get("regional", {}).get("bottom")
+    top_dept = drivers.get("departments", {}).get("top")
+    bottom_dept = drivers.get("departments", {}).get("bottom")
+    
+    # Store pulse data
+    store_pulse = ctx.get("store_pulse", {})
+    worst_store = store_pulse.get("worst_store")
+    best_store = store_pulse.get("best_store")
+    
+    actions.append("**Next 7 Days — Do This**")
+    
+    # Priority actions based on actual data
+    if worst_store:
+        actions.append(f"1. **{worst_store}**: Implement targeted promotions to increase sales by 15%.")
+    elif bottom_region:
+        actions.append(f"1. **{bottom_region}**: Launch promotional campaigns to boost performance by 10%.")
+    else:
+        actions.append("1. **Underperformers**: Identify and address bottom quartile locations by 15%.")
+    
+    if best_store:
+        actions.append(f"2. **{best_store}**: Document best practices for replication across network.")
+    elif top_region:
+        actions.append(f"2. **{top_region}**: Scale successful strategies to other regions by 20%.")
+    else:
+        actions.append("2. **Top Performers**: Capture and scale winning practices network-wide.")
+    
+    if bottom_dept:
+        actions.append(f"3. **{bottom_dept}**: Optimize inventory and placement to improve sales by 15%.")
+    elif last_wow < -5:
+        actions.append("3. **Revenue Decline**: Implement immediate recovery plan to reverse trend.")
+    else:
+        actions.append("3. **Growth Focus**: Test new promotional strategies in key locations.")
+    
+    return "\n".join(actions)

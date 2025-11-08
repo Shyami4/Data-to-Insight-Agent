@@ -639,34 +639,48 @@ def table_store_4wk_change(df: pd.DataFrame) -> pd.DataFrame:
       last_4w  = sum of the most recent 4 weekly buckets
       prev_4w  = sum of the 4 weeks immediately before that
       pct_change = (last_4w - prev_4w) / prev_4w
-    Returns a styled DataFrame ready for st.dataframe.
+    Returns a nicely labeled DataFrame ready for st.dataframe().
     """
     d = _safe_weekly(df)
     if d.empty or "store" not in d:
-        return pd.DataFrame(columns=["store","last_4w","prev_4w","pct_change"])
+        return pd.DataFrame(columns=[
+            "Store",
+            "Last 4 Weeks Sales ($)",
+            "Previous 4 Weeks Sales ($)",
+            "Change vs Prev 4 Weeks (%)",
+        ])
 
-    # aggregate to weekly buckets first (handles multiple rows per week)
+    # aggregate to weekly buckets first
     w = (d.groupby(["store", pd.Grouper(key="date", freq="W")], as_index=False)["weekly_sales"]
-          .sum()
-          .rename(columns={"weekly_sales":"sales"}))
+           .sum()
+           .rename(columns={"weekly_sales": "sales"}))
 
-    # take last 8 weeks per store so we can compare 4 vs previous 4
     def _last8(g):
         g = g.sort_values("date").tail(8)
-        last4 = g.tail(4)["sales"].sum()
-        prev4 = g.head(max(len(g)-4, 0))["sales"].tail(4).sum()
-        pct   = np.nan if prev4 == 0 else (last4 - prev4)/prev4
-        return pd.Series({"last_4w": float(last4), "prev_4w": float(prev4), "pct_change": float(pct) if pd.notna(pct) else np.nan})
+        last4 = float(g.tail(4)["sales"].sum())
+        prev4 = float(g.iloc[:-4]["sales"].tail(4).sum()) if len(g) >= 5 else 0.0
+        pct   = np.nan if prev4 == 0 else (last4 - prev4) / prev4
+        return pd.Series({"last_4w": last4, "prev_4w": prev4, "pct_change": pct})
 
     t = w.groupby("store").apply(_last8).reset_index()
-    t = t.sort_values("pct_change", ascending=False)
 
-    # neat display columns
-    t["Δ vs prev 4w"] = t["pct_change"].apply(lambda v: "" if pd.isna(v) else f"{v*100:+.1f}%")
-    t["last_4w"] = t["last_4w"].round(0).astype(int)
-    t["prev_4w"] = t["prev_4w"].round(0).astype(int)
+    # ✅ sort on the numeric column to avoid string→float errors
+    t = t.sort_values("pct_change", ascending=False, na_position="last")
 
-    return t[["store","last_4w","prev_4w","Δ vs prev 4w"]]
+    # pretty display columns
+    t["Last 4 Weeks Sales ($)"]     = t["last_4w"].round(0).astype(int)
+    t["Previous 4 Weeks Sales ($)"] = t["prev_4w"].round(0).astype(int)
+    t["Change vs Prev 4 Weeks (%)"] = t["pct_change"].apply(
+        lambda v: "" if pd.isna(v) else f"{v*100:+.1f}%"
+    )
+
+    # final order + rename
+    t = t.rename(columns={"store": "Store"})[
+        ["Store", "Last 4 Weeks Sales ($)", "Previous 4 Weeks Sales ($)", "Change vs Prev 4 Weeks (%)"]
+    ]
+    return t
+
+
 
 
 # Add to plots.py

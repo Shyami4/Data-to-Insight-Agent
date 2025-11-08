@@ -254,9 +254,23 @@ st.markdown("""
 .ai-summary-card ol li { margin:6px 0; color:#cbd5e1; line-height: 1.7; }
 
 /* Prevent markdown rendering issues */
-.ai-summary-card p { margin: 8px 0; line-height: 1.7; }
-.ai-summary-card strong { font-weight: 700; }
+.ai-summary-card p { margin: 8px 0; line-height: 1.7; color: #cbd5e1; }
+.ai-summary-card strong { font-weight: 700; color: #e5e7eb; }
 .ai-summary-card em { font-style: italic; }
+            
+/* Uniform subheading style inside AI cards */
+.ai-summary-card .ai-subheading{
+  margin: 16px 0 8px 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #e5e7eb;
+  letter-spacing: .2px;
+}
+
+/* Ensure bullet points have consistent styling */
+.ai-summary-card div {
+  color: #cbd5e1;
+}
 
 /* card header */
 .ai-summary-header{
@@ -603,12 +617,13 @@ def _hash_ctx(ctx: dict) -> str:
 
 def _clean_markdown_for_display(md: str) -> str:
     """
-    Clean markdown text to fix rendering issues.
-    ENHANCED: Fixes italic markers, currency symbols, and spacing.
+    Clean markdown text and convert to HTML for display inside HTML containers.
+    ENHANCED: Properly converts markdown formatting to HTML tags.
     """
     if not md:
         return ""
     
+    # First, do the existing text cleaning
     # CRITICAL: Handle italic markers causing concatenation
     # Pattern: *text*nextword → *text* nextword
     md = re.sub(r'\*([^*]+?)\*([a-zA-Z0-9])', r'*\1* \2', md)
@@ -640,13 +655,39 @@ def _clean_markdown_for_display(md: str) -> str:
     # Fix camelCase separation
     md = re.sub(r'([a-z])([A-Z])', r'\1 \2', md)
     
-    # Escape underscores for markdown
-    md = re.sub(r'(?<!\\)_', r'\_', md)
-    
     # Clean up excessive spaces
     md = re.sub(r'  +', ' ', md)
     
-    return md.strip()
+    # NOW CONVERT MARKDOWN TO HTML
+    # Convert **text** to <strong>text</strong>
+    md = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', md)
+    
+    # Convert *text* to <em>text</em>
+    md = re.sub(r'(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)', r'<em>\1</em>', md)
+    
+    # Convert bullet points to proper list items with consistent styling
+    # Split into lines and process each one
+    lines = md.split('\n')
+    processed_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('• '):
+            # Convert bullet points to styled divs that match other sections
+            content = line[2:]  # Remove '• '
+            processed_lines.append(f'<div style="margin: 6px 0; color: #cbd5e1; line-height: 1.7;">• {content}</div>')
+        elif line.startswith('<strong>') and line.endswith('</strong>'):
+            # Section headers - add proper styling
+            header_text = line[8:-9]  # Remove <strong> tags
+            processed_lines.append(f'<div class="ai-subheading">{header_text}</div>')
+        elif line:
+            # Regular paragraphs
+            processed_lines.append(f'<p style="margin: 8px 0; line-height: 1.7; color: #cbd5e1;">{line}</p>')
+        else:
+            # Empty lines for spacing
+            processed_lines.append('<br>')
+    
+    return '\n'.join(processed_lines)
 
 def ai_note(title: str, ctx: dict, icon: str = "💡"):
     """Render a tiny AI note below a chart with caching"""
@@ -845,6 +886,42 @@ def _style_fuchsia_headers(md: str) -> str:
         out.append(line)
     return "\n".join(out)
 
+def _normalize_ai_headers(md: str) -> str:
+    """
+    Make section headers inside AI cards consistent:
+    - Converts common variants (e.g., **IMMEDIATE ACTIONS**, **Immediate Actions**)
+      into a uniform, styled div.
+    - Keeps canonical labels for the exec summary.
+    """
+    if not md:
+        return md
+
+    # Map common variants to canonical text
+    replacements = {
+        r"^\s*\*\*momentum\*\*\s*$":                   "Momentum",
+        r"^\s*\*\*store pulse\*\*\s*$":                "Store Pulse",
+        r"^\s*\*\*ranking\s*&\s*benchmarks\*\*\s*$":   "Ranking & Benchmarks",
+        r"^\s*\*\*next\s*7\s*days\s*—?\s*do\s*this\*\*\s*$": "Next 7 Days — Do This",
+
+        # Priority/Action blocks from other generators:
+        r"^\s*\*\*immediate actions.*\*\*\s*$":        "Immediate Actions",
+        r"^\s*\*\*priority actions.*\*\*\s*$":         "Priority Actions",
+        r"^\s*\*\*strategic recommendations.*\*\*\s*$":"Strategic Recommendations",
+        r"^\s*\*\*strategic overview.*\*\*\s*$":       "Strategic Overview",
+    }
+
+    lines = md.split("\n")
+    out = []
+    for line in lines:
+        # If the line is a pure bold header (no bullet prefix), standardize it
+        if not line.strip().startswith(("•","-","*","○","◦")) and "**" in line:
+            for pat, label in replacements.items():
+                if re.match(pat, line, flags=re.IGNORECASE):
+                    line = f"<div class='ai-subheading'>{label}</div>"
+                    break
+        out.append(line)
+    return "\n".join(out)
+
 def render_ai_summary_block(title: str, ctx: dict, *,
                             draft_fn,                 
                             show_toggle: bool = True,
@@ -866,8 +943,9 @@ def render_ai_summary_block(title: str, ctx: dict, *,
         with st.spinner(" Generating AI summary..."):
             try:
                 raw_md = draft_fn(ctx) or ""
-                cleaned_md = _clean_markdown_for_display(raw_md)  # NEW
+                cleaned_md = _clean_markdown_for_display(raw_md)
                 styled_md = _style_fuchsia_headers(cleaned_md)
+                final_md   = _normalize_ai_headers(styled_md)
                 ss.page_summary_cache[cache_key] = styled_md
             except Exception as e:
                 ss.page_summary_cache[cache_key] = f" Unable to generate summary: {str(e)}"
@@ -895,6 +973,52 @@ def render_ai_summary_block(title: str, ctx: dict, *,
     #     if st.button("🗓️ Schedule Follow-up", use_container_width=True, key=f"{toggle_key}_followup"):
     #         st.success("✅ Meeting scheduled!")
 
+
+# --- Helpers to build a single cohesive context (Overview + Drivers) ---
+def _build_ai_summary_ctx(df: pd.DataFrame, r: dict) -> dict:
+    """
+    Cohesive context for AI Summary tab combining:
+    - Overview momentum & store pulse
+    - Drivers & Performance (regional + department highlights)
+    """
+    # Base overview ctx you already use elsewhere
+    base_ctx = _build_page_summary_ctx(df, r)  # Momentum, WoW, Store pulse, Benchmarks:contentReference[oaicite:2]{index=2}
+
+    # Drivers context (regional & departments) pulled from the same 'result' dict
+    regional = (r or {}).get("regional", {}) or {}
+    departments = (r or {}).get("departments", {}) or {}
+    benchmarks = (r or {}).get("benchmarks", {}) or {}
+
+    # Normalize a compact “drivers” section
+    drivers_ctx = {
+        "regional": {
+            "regions": list(regional.keys()),
+            "sales": {k: regional[k].get("sales", 0) for k in regional} if regional else {},
+            "top": max(regional, key=lambda k: regional[k].get("sales", 0)) if regional else None,
+            "bottom": min(regional, key=lambda k: regional[k].get("sales", 0)) if regional else None,
+        },
+        "departments": {
+            "sales": {k: departments[k].get("sales", 0) for k in departments} if departments else {},
+            "top": max(departments, key=lambda k: departments[k].get("sales", 0)) if departments else None,
+            "bottom": min(departments, key=lambda k: departments[k].get("sales", 0)) if departments else None,
+        },
+        "benchmarks": benchmarks,
+    }
+
+    base_ctx["drivers"] = drivers_ctx
+    return base_ctx
+
+
+def _ai_card(title: str, body_md: str):
+    """Render a single AI card using the same class used elsewhere."""
+    st.markdown(
+        f"<div class='ai-summary-card'>"
+        f"  <div class='ai-summary-header'><h3 class='ai-summary-title'>{title}</h3></div>"
+        f"  <hr class='ai-hr'/>"
+        f"  {_clean_markdown_for_display(body_md)}"  # reuse your text cleaner:contentReference[oaicite:3]{index=3}
+        f"</div>",
+        unsafe_allow_html=True
+    )
 
 # ---------- SIDEBAR NAVIGATION ----------
 with st.sidebar:
@@ -990,7 +1114,7 @@ with st.sidebar:
     # Footer
     st.markdown("""
     <div style="text-align: center; padding: 20px 0; color: #64748b; font-size: 0.75rem;">
-        <p style="margin: 0;">Powered by AI</p>
+        <p style="margin: 0;">Powered by ChatGPT</p>
         <p style="margin: 4px 0 0 0;">v1.0.0</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1418,7 +1542,7 @@ elif page == "Overview":
     # TWO-COLUMN LAYOUT: WoW Growth + Store Comparison Table
     st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
     
-    col_left, col_right = st.columns([1.3, 0.7])
+    col_left, col_right = st.columns([1.2, 0.8])
 
     with col_left:
         fig = fig_wow_bars(r.get("kpis_weekly", {}), height=400)
@@ -1429,6 +1553,7 @@ elif page == "Overview":
         st.markdown("###### 4-Week Store Comparison")
         
         t = table_store_4wk_change(fdf)
+
         if t.empty:
             st.info("Not enough weekly data to compute 4-week changes.")
         else:
@@ -1443,13 +1568,14 @@ elif page == "Overview":
                 return ""
             
             st.dataframe(
-                t.style.map(_color_delta, subset=["Δ vs prev 4w"]).format({
-                    "last_4w": "{:,.0f}",
-                    "prev_4w": "{:,.0f}",
+                t.style.map(_color_delta, subset=["Change vs Prev 4 Weeks (%)"]).format({
+                    "Last 4 Weeks Sales ($)": "{:,.0f}",
+                    "Previous 4 Weeks Sales ($)": "{:,.0f}",
                 }),
                 use_container_width=True,
                 hide_index=True,
             )
+
         
         st.caption("💡 Stores with negative Δ need immediate investigation")
 
@@ -1828,160 +1954,222 @@ elif page == "Drivers & Performance":
 
 # -------- AI INSIGHTS & RECOMMENDATIONS --------
 elif page == "AI Insights & Recommendations":
-    _ensure_data()
-    if ss.result is None: 
-        _recompute(_filter_df(ss.df))
-
     page_header(
-        title="AI Insights & Recommendations",
-        subtitle="AI-generated business insights with prioritized action items for immediate impact—your intelligent advisor",
-        gradient_start="#ec4899",
-        gradient_end="#db2777"
+        "AI Recommendations & Insights",
+        "Comprehensive executive readout with deep insights and contextual AI chat."
     )
-    
-    # if ss.insights is None:
-    #     with st.spinner("🤖 AI is analyzing your data and generating insights..."):
-    #         chart_descs = [
-    #             {"title": "Sales Trend & Forecast"},
-    #             {"title": "Regional Performance"},
-    #             {"title": "Store Efficiency Quadrants"},
-    #             {"title": "Department 80/20 Analysis"}
-    #         ]
-    #         ss.insights = draft_insights(ss.result, chart_descs)
-    #         time.sleep(0.5)
 
-    # AI-Generated Insights
-    section_divider("AI-Generated Insights", "🎯")
-    
-    st.markdown("""
-    <div style="
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        padding: 28px;
-        border-radius: 16px;
-        border: 1px solid #334155;
-        margin-bottom: 24px;
-    ">
-    """, unsafe_allow_html=True)
-    
-    st.markdown(ss.insights or "_AI insights are being generated..._")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
+    _ensure_data()
+    df_filtered = _filter_df(ss.df)
+    result = ss.result or {}
 
-    # Priority Actions
-    section_divider("Recommended Actions", "✨")
-    
-    st.markdown("""
-    <div style="
-        background: rgba(236, 72, 153, 0.1);
-        border-left: 4px solid #ec4899;
-        padding: 16px 20px;
-        border-radius: 12px;
-        margin-bottom: 24px;
-    ">
-        <span style="color: #f9a8d4; font-weight: 600; font-size: 1.05rem;">💡 Pro Tip:</span>
-        <span style="color: #cbd5e1; margin-left: 8px;">
-            These recommendations are prioritized by potential business impact. Start with the highest priority items for maximum ROI.
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
+    # ---------- Build enhanced context ----------
+    from narrative import _build_enhanced_ai_context
+    ctx = _build_enhanced_ai_context(df_filtered, result)
 
-    # Action cards
-    col1, col2, col3 = st.columns(3)
+    # Initialize AI insights cache
+    ss.setdefault("ai_insights_cache", {})
+
+    # ---------- EXECUTIVE AI SUMMARY ----------
+    section_divider("Executive AI Summary")
     
+    # Cache key for executive summary
+    exec_cache_key = f"executive_summary:{_hash_ctx(ctx)}"
+    
+    if exec_cache_key not in ss.ai_insights_cache:
+        with st.spinner("Generating AI executive summary..."):
+            try:
+                ss.ai_insights_cache[exec_cache_key] = draft_page_summary(ctx)
+            except Exception as e:
+                ss.ai_insights_cache[exec_cache_key] = f"Executive summary unavailable: {str(e)}"
+    
+    _ai_card("Strategic Overview", ss.ai_insights_cache[exec_cache_key])
+
+
+    # ---------- STRATEGIC RECOMMENDATIONS ----------
+    section_divider("Strategic Recommendations")
+    
+    # Cache key for strategic actions
+    strategy_cache_key = f"strategic_actions:{_hash_ctx(ctx)}:{_hash_ctx(result)}"
+    
+    if strategy_cache_key not in ss.ai_insights_cache:
+        with st.spinner("Generating strategic recommendations..."):
+            try:
+                from narrative import _generate_strategic_actions
+                ss.ai_insights_cache[strategy_cache_key] = _generate_strategic_actions(ctx, df_filtered, result)
+            except Exception as e:
+                ss.ai_insights_cache[strategy_cache_key] = f"Strategic recommendations unavailable: {str(e)}"
+    
+    _ai_card("Priority Actions (Next 30 Days)", ss.ai_insights_cache[strategy_cache_key])
+
+     # Cache management controls
+    st.markdown("---")
+    st.markdown("**Cache Management**")
+    col_cache1, col_cache2, col_cache3 = st.columns(3)
+    
+    with col_cache1:
+        if st.button("🔄 Refresh AI Insights", use_container_width=True):
+            # Clear AI insights cache
+            if "ai_insights_cache" in ss:
+                ss.ai_insights_cache.clear()
+            st.success("AI insights cache cleared. Page will refresh with new content.")
+            st.rerun()
+    
+    with col_cache2:
+        cache_size = len(ss.get("ai_insights_cache", {}))
+        st.metric("Cached Insights", cache_size)
+    
+    with col_cache3:
+        total_cache_size = len(ss.get("ai_cache", {})) + len(ss.get("ai_insights_cache", {}))
+        st.metric("Total AI Cache", total_cache_size)
+
+        
+    # ---------- ADVANCED AI CHAT ----------
+    section_divider("AI Analyst Chat")
+    
+    # Initialize chat history
+    if "chat_history" not in ss:
+        ss.chat_history = []
+    
+    # Display chat history
+    for i, message in enumerate(ss.chat_history):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+    # Enhanced chat with conversation memory
+    st.caption("Ask follow-up questions about your data. The AI remembers our conversation context.")
+    
+    # Chat input with suggestions
+    example_questions = [
+        "What explains the latest sales dip?",
+        "Which 2 stores should I prioritize?",
+        "What's driving the performance gap?",
+        "How can I improve bottom performers?",
+        "What are the biggest growth opportunities?"
+    ]
+    
+    with st.expander("Example Questions", expanded=False):
+        for q in example_questions:
+            if st.button(q, key=f"example_{hash(q)}", use_container_width=True):
+                ss.chat_example_question = q
+
+    # Use example question if clicked
+    if hasattr(ss, 'chat_example_question'):
+        user_q = ss.chat_example_question
+        del ss.chat_example_question
+    else:
+        user_q = st.chat_input("Ask your question here...")
+
+    if user_q:
+        # Add user message to history
+        ss.chat_history.append({"role": "user", "content": user_q})
+        
+        with st.chat_message("user"):
+            st.markdown(user_q)
+
+        # Enhanced context for chat with accurate data
+        enhanced_grounded_ctx = {
+            "filters": ss.filters,
+            "summary_ctx": ctx,
+            "kpis_weekly": result.get("kpis_weekly", {}),
+            "regional": result.get("regional", {}),
+            "departments": result.get("departments", {}),
+            "stores": result.get("stores", {}),
+            "benchmarks": result.get("benchmarks", {}),
+            "conversation_history": ss.chat_history[-3:]  # Reduced context for more focused responses
+        }
+
+        with st.chat_message("assistant"):
+            try:
+                from openai import OpenAI
+                import os, json
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+                # Enhanced system prompt for concise, accurate responses
+                sys_prompt = """You are a Senior Retail Analytics Consultant providing concise strategic insights.
+
+RESPONSE REQUIREMENTS:
+- Maximum 3-4 sentences per response
+- Use ONLY numbers from the provided context data
+- Be specific and actionable
+- Reference exact store names, departments, or regions from the data
+
+DATA HANDLING:
+- When specific data IS available: Use exact numbers and entity names
+- When specific data is NOT available: Provide general retail best practices and strategic guidance
+- Always be helpful - don't just say "data not available"
+
+ANALYSIS APPROACH:
+1. Check if relevant data exists in context
+2. If YES: Use specific numbers and recommendations
+3. If NO: Provide general strategic advice for the situation
+4. Always include actionable next steps
+
+NEVER:
+- Make up numbers not in the context
+- Assume data not provided"""
+
+                # Build conversation with limited history for focus
+                messages = [{"role": "system", "content": sys_prompt}]
+                
+                # Add context with specific data validation
+                messages.append({
+                    "role": "user", 
+                    "content": f"VERIFIED DATA CONTEXT:\n{json.dumps(enhanced_grounded_ctx, indent=2, default=str)}"
+                })
+                
+                # Add recent conversation history (limited)
+                for msg in ss.chat_history[-4:-1]:  # Only last 3 exchanges
+                    messages.append(msg)
+                
+                # Add current question
+                messages.append({"role": "user", "content": user_q})
+
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=0.2,  # Lower temperature for more consistent, factual responses
+                    max_tokens=200,   # Reduced token limit for conciseness
+                    presence_penalty=0.1
+                )
+                
+                ai_response = resp.choices[0].message.content
+                st.markdown(ai_response)
+                
+                # Add AI response to history
+                ss.chat_history.append({"role": "assistant", "content": ai_response})
+                
+                # Keep chat history manageable (last 12 messages)
+                if len(ss.chat_history) > 12:
+                    ss.chat_history = ss.chat_history[-12:]
+                    
+            except Exception as e:
+                error_msg = f"AI response unavailable: {e}"
+                st.warning(error_msg)
+                ss.chat_history.append({"role": "assistant", "content": error_msg})
+    
+   
+    
+    # Chat controls
+    st.markdown("---")
+    col1, col2 = st.columns(2)
     with col1:
-        st.markdown("""
-        <div style="
-            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-            padding: 24px;
-            border-radius: 16px;
-            border: 1px solid #334155;
-            height: 100%;
-        ">
-            <div style="font-size: 40px; margin-bottom: 16px;">📊</div>
-            <h3 style="color: #f8fafc; margin: 0 0 12px 0; font-size: 1.2rem;">Share Insights</h3>
-            <p style="color: #94a3b8; margin: 0 0 16px 0; font-size: 0.9rem;">
-                Distribute findings to your team via Slack
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("📤 Send to Slack", use_container_width=True, key="slack"):
-            st.success("✅ Insights shared to #analytics channel")
-    
+        if st.button("Clear Chat History", use_container_width=True):
+            ss.chat_history = []
+            st.rerun()
     with col2:
-        st.markdown("""
-        <div style="
-            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-            padding: 24px;
-            border-radius: 16px;
-            border: 1px solid #334155;
-            height: 100%;
-        ">
-            <div style="font-size: 40px; margin-bottom: 16px;">🗓️</div>
-            <h3 style="color: #f8fafc; margin: 0 0 12px 0; font-size: 1.2rem;">Schedule Review</h3>
-            <p style="color: #94a3b8; margin: 0 0 16px 0; font-size: 0.9rem;">
-                Set up operational review meeting
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("🗓️ Schedule Meeting", use_container_width=True, key="calendar"):
-            st.success("✅ Meeting invite sent to stakeholders")
-    
-    with col3:
-        st.markdown("""
-        <div style="
-            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-            padding: 24px;
-            border-radius: 16px;
-            border: 1px solid #334155;
-            height: 100%;
-        ">
-            <div style="font-size: 40px; margin-bottom: 16px;">📑</div>
-            <h3 style="color: #f8fafc; margin: 0 0 12px 0; font-size: 1.2rem;">Export Report</h3>
-            <p style="color: #94a3b8; margin: 0 0 16px 0; font-size: 0.9rem;">
-                Download comprehensive PDF report
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("📑 Export PDF", use_container_width=True, key="pdf"):
-            st.success("✅ Report generated and downloaded")
+        if st.button("Export Chat Log", use_container_width=True):
+            chat_export = "\n\n".join([
+                f"**{msg['role'].title()}:** {msg['content']}"
+                for msg in ss.chat_history
+            ])
+            st.download_button(
+                "Download Chat Log",
+                data=chat_export,
+                file_name=f"ai_chat_log_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.md",
+                mime="text/markdown"
+            )
 
-    # Performance Summary
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    with st.expander("📈 View Detailed Performance Metrics", expanded=False):
-        r = ss.result
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "Total Records Analyzed",
-                f"{r.get('record_count', 0):,}",
-                help="Number of sales records processed"
-            )
-        
-        with col2:
-            st.metric(
-                "Time Period",
-                "6 months",
-                help="Analysis timeframe"
-            )
-        
-        with col3:
-            outliers = r.get('outliers', 0)
-            st.metric(
-                "Anomalies Detected",
-                f"{outliers}",
-                delta="-2 vs last month" if outliers < 5 else "+1 vs last month",
-                delta_color="normal" if outliers < 5 else "inverse"
-            )
-        
-        with col4:
-            st.metric(
-                "Data Quality Score",
-                "97.4%",
-                delta="+2.1%",
-                help="Percentage of complete records"
-            )
+
 
 # ==================== END OF APP ====================
