@@ -2059,7 +2059,7 @@ elif page == "AI Insights & Recommendations":
     col_cache1, col_cache2, col_cache3 = st.columns(3)
     
     with col_cache1:
-        if st.button("🔄 Refresh AI Insights", use_container_width=True):
+        if st.button("Refresh AI Insights", use_container_width=True):
             # Clear AI insights cache
             if "ai_insights_cache" in ss:
                 ss.ai_insights_cache.clear()
