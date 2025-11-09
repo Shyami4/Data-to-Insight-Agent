@@ -67,17 +67,25 @@ cd data-to-insight-agent
 ```
 
 ### Create a Virtual environment
+```bash
 python -m venv venv
 source venv/bin/activate   # (Linux/Mac)
 venv\Scripts\activate      # (Windows)
+```
 
 ### Install dependencies
+```bash
 pip install -r requirements.txt
+```
 
 ### Add your OpenAI API key
 Create a .env file in the project root directory with the following content:
+```bash
 OPENAI_API_KEY=your_api_key_here
+```
 
 ### Run the app locally
+```bash
 streamlit run app.py
+```
 
