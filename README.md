@@ -64,6 +64,7 @@ Upload the **sample dataset** from `sample_data/sales_demo.csv` to explore full 
 ```bash
 git clone https://github.com/Shyami4/data-to-insight-agent.git
 cd data-to-insight-agent
+```
 
 ### Create a Virtual environment
 python -m venv venv
