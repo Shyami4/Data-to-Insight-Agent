@@ -17,7 +17,7 @@ This project demonstrates:
 
 **Public App:** [https://data2insights.streamlit.app/](https://data2insights.streamlit.app/)  
 
-Upload the **sample dataset** from `sample_data/sales_demo.csv` to explore full functionality — including sales trends, store benchmarks, and AI-generated summaries.
+Upload the **sample dataset** from `sample_data/sales_demo.csv` to explore full functionality, including sales trends, store benchmarks, and AI-generated summaries.
 
 ---
 
