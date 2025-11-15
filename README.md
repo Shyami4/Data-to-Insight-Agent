@@ -4,9 +4,9 @@
 ---
 
 ## Overview
-The **Data-to-Insight Agent** is a **Streamlit-based AI prototype** that transforms raw CSV uploads into executive-ready summaries, business KPIs, and strategic recommendations.
+The **Data-to-Insight Agent** is a **Streamlit-based AI prototype** that transforms raw CSV uploads into executive-ready summaries, business KPIs, and strategic recommendations, along with an intelligent AI Chat bot that responds to natural language queries with answers set in the data and context.
 
-This project was developed as part of the **Firstsource STEM Proof-of-Concept Challenge** to demonstrate:
+This project demonstrates:
 - Real-time insights from structured data (no analyst wait times)
 - Trend, benchmark, and anomaly detection
 - Responsible AI with local data processing and anonymized context
@@ -17,7 +17,7 @@ This project was developed as part of the **Firstsource STEM Proof-of-Concept Ch
 
 **Public App:** [https://data2insights.streamlit.app/](https://data2insights.streamlit.app/)  
 
-Upload the **sample dataset** from `sample_data/sales_demo.csv` to explore full functionality — including sales trends, store benchmarks, and AI-generated summaries.
+Upload the **sample dataset** from `sample_data/sales_demo.csv` to explore full functionality, including sales trends, store benchmarks, and AI-generated summaries.
 
 ---
 
