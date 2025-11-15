@@ -5,7 +5,7 @@
 
 ## Overview
 ![Streamlit Dashboard Demo](demo/ai_poc_demo.gif)  
-For better quality, watch the full dashboard demo video here: [Dashboard Video]([https://youtu.be/TwNgo616K8Y](https://youtu.be/0cGcTjzptPE?si=cZenvX0ySN5LqnPs))
+For better quality, watch the full dashboard demo video here: [Dashboard Video](https://www.youtube.com/watch?v=0cGcTjzptPE)
 
 The **Data-to-Insight Agent** is a **Streamlit-based AI prototype** that transforms raw CSV uploads into executive-ready summaries, business KPIs, and strategic recommendations, along with an intelligent AI Chat bot that responds to natural language queries with answers set in the data and context.
 
