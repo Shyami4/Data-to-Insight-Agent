@@ -145,6 +145,9 @@ def fig_sales_trend_with_stores(
     return fig
 
 def fig_wow_bars(weekly_dict: dict, height=280) -> go.Figure:
+    import numpy as np
+    import pandas as pd
+    import plotly.express as px
 
     w = pd.DataFrame(weekly_dict).copy()
     if w.empty or "date" not in w or "weekly_sales_sum" not in w:
@@ -506,6 +509,9 @@ def kpi_value_and_delta_vs_py(df, ycol):
     delta = 0.0 if py_sum == 0 else (curr_sum - py_sum) / py_sum
     return float(curr_sum), float(delta)
 
+import pandas as pd
+import numpy as np
+import plotly.express as px
 
 def _safe_weekly(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()

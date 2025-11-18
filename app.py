@@ -31,6 +31,13 @@ from plots import (
     outlier_table_iqr,
 )
 
+load_dotenv()
+st.set_page_config(
+    page_title="AI Data Analyst | Sales Intelligence",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # ---------- ENHANCED CSS ----------
 st.markdown("""
 <style>
@@ -298,8 +305,7 @@ rules = load_rules()
 st.set_page_config(
     page_title="Data-to-Insight Agent",
     page_icon="images/agent_icon.png",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 
